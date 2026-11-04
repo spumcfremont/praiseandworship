@@ -123,6 +123,16 @@
     return h.text;
   }
 
+  // Sticky bars sit right under the header, whatever its real height (status bar, font size).
+  const topbar = document.querySelector(".topbar");
+  const syncTopbar = () => {
+    if (topbar) document.documentElement.style.setProperty("--topbar-full", `${topbar.getBoundingClientRect().height}px`);
+  };
+  syncTopbar();
+  window.addEventListener("resize", syncTopbar);
+  window.addEventListener("orientationchange", syncTopbar);
+  if (topbar && "ResizeObserver" in window) new ResizeObserver(syncTopbar).observe(topbar);
+
   // ---------- Theme & sign out ----------
   const themeBtn = document.getElementById("theme");
   const THEME_ICONS = { auto: "◐", light: "☀", dark: "☾" };
