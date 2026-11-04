@@ -9,3 +9,4 @@ dev/setlists.json
 dev/*.tmp
 dev/drive-import/
 client_secret*.json
+dev/local-backup.json

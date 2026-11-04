@@ -132,10 +132,10 @@
     themeBtn.textContent = THEME_ICONS[t];
     themeBtn.title = `Theme: ${t === "auto" ? "match device" : t}`;
   }
-  let theme = (() => { try { return localStorage.getItem("pw-theme") || "auto"; } catch { return "auto"; } })();
+  let theme = (() => { try { return localStorage.getItem("pw-theme") || "light"; } catch { return "light"; } })();
   applyTheme(theme);
   themeBtn.addEventListener("click", () => {
-    theme = { auto: "light", light: "dark", dark: "auto" }[theme];
+    theme = { light: "dark", dark: "auto", auto: "light" }[theme] || "light";
     try { localStorage.setItem("pw-theme", theme); } catch {}
     applyTheme(theme);
   });
@@ -539,6 +539,7 @@
           <div class="spacer"></div>
           <button class="btn primary" data-act="stage" type="button" title="Fill the screen with just the song">⛶ Fullscreen</button>
           <button class="btn" data-act="print" type="button">Print</button>
+          <button class="btn" data-act="lyrics" type="button">Lyrics only</button>
           ${setBtn()}
           <a class="btn" href="#/edit/${encodeURIComponent(song.id)}">Edit</a>
         </div>
@@ -621,6 +622,9 @@
           break;
         }
         case "print": window.print(); break;
+        case "lyrics":
+          LyricsExport.open([song], { filename: `lyrics-${song.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`, toast });
+          break;
         case "stage": await setStage(!stage.on); break;
         case "addset": {
           const next = upcomingSets()[0];
@@ -778,6 +782,7 @@
         <div class="set-tools no-print">
           <button class="btn primary" data-act="stage" type="button">⛶ Fullscreen</button>
           <button class="btn" data-act="print" type="button">Print all</button>
+          <button class="btn" data-act="lyrics" type="button">Lyrics only</button>
           <a class="btn" href="#/set/${sid}/edit">Edit set</a>
           <div class="toolgroup" role="group" aria-label="Text size">
             <button class="btn icon" data-act="smaller" type="button" aria-label="Smaller text">A−</button>
@@ -885,6 +890,16 @@
           btn.setAttribute("aria-pressed", view.chords);
           prefs.set("pw-view", view);
           break;
+        case "lyrics": {
+          const list = set.items.map(songOf).filter(Boolean);
+          if (!list.length) return toast("Add songs to the set first.");
+          LyricsExport.open(list, {
+            heading: `${fullDate(set.date)}${set.title ? ` · ${set.title}` : ""}`,
+            filename: `lyrics-${set.date}`,
+            toast,
+          });
+          break;
+        }
         case "prev": jump(Math.max(0, currentIndex() - 1)); break;
         case "next": jump(Math.min(set.items.length - 1, currentIndex() + 1)); break;
         case "print": window.print(); break;

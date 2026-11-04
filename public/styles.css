@@ -588,3 +588,15 @@ body.stage .set-tools, body.stage .set-jump, body.stage .ss-tools { display: non
   .ss-printkey { display: block; margin-left: auto; font: 700 12pt var(--label); }
   .set-song .sheet { --size: 12pt !important; }
 }
+
+/* ---------- Lyrics export dialog ---------- */
+.lyrics-dialog {
+  width: min(440px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 18px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 20px 60px rgba(43, 12, 34, 0.3);
+}
+.lyrics-dialog::backdrop { background: rgba(23, 8, 18, 0.45); }
+.lyrics-dialog form { display: flex; flex-direction: column; gap: 8px; padding: 22px 20px 18px; }
+.lyrics-dialog h2 { font-size: 24px; }
+.lyrics-dialog .hint { margin: 0 0 8px; }
+.lyrics-dialog .btn { width: 100%; min-height: 46px; font-size: 15px; }
+.lyrics-dialog .fine { margin: -2px 0 8px !important; font-size: 13px; }
