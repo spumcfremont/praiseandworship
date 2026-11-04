@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Praise &amp; Worship · St. Paul UMC</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#5A1750">
+<link rel="icon" href="/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Worship">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..700&family=Karla:ital,wght@0,300..700;1,300..600&family=Jost:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/styles.css">
+<script>try{var t=localStorage.getItem("pw-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/" aria-label="Praise and Worship, all songs"><span class="logo-mark" aria-hidden="true"></span><span>Praise <em>&amp;</em> Worship</span></a>
+  <nav class="nav" aria-label="Main">
+    <a href="#/" data-nav="songs">Songs</a>
+    <a href="#/stats" data-nav="stats">Stats</a>
+  </nav>
+  <div class="spacer"></div>
+  <button class="btn ghost icon" id="theme" type="button" title="Switch light / dark" aria-label="Switch light or dark mode"></button>
+  <button class="btn ghost" id="logout" type="button">Sign out</button>
+</header>
+<main class="wrap" id="app"><div class="loading">Loading songs…</div></main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/chordpro.js"></script>
+<script src="/app.js"></script>
+<script src="/install.js"></script>
+</body>
+</html>

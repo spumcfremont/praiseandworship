@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "Praise & Worship · St. Paul UMC",
+  "short_name": "Worship",
+  "description": "The St. Paul UMC worship team's songs and chords.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#170812",
+  "theme_color": "#5A1750",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

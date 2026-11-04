@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Sign in · Praise &amp; Worship</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#5A1750">
+<link rel="icon" href="/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Worship">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..700&family=Karla:ital,wght@0,300..700;1,300..600&family=Jost:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/styles.css">
+<script>try{var t=localStorage.getItem("pw-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<main class="login">
+  <div class="login-card">
+    <div class="logo-mark logo-hero" role="img" aria-label="SPUMC Praise Team, since 2024"></div>
+    <h1>Praise <em>&amp;</em> Worship</h1>
+    <p>St. Paul UMC worship team song library</p>
+    <form id="login" novalidate>
+      <label for="password">Team password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button class="btn primary" type="submit">Open the songbook</button>
+      <p class="error" id="err" role="alert" hidden></p>
+    </form>
+    <a class="app-link" href="/install">📱 Put this on your phone</a>
+    <a class="church-plate" href="https://www.belongatstpaul.org" target="_blank" rel="noopener">
+      <img src="/saint-paul-logo.png" alt="Saint Paul United Methodist Church">
+    </a>
+  </div>
+</main>
+<script src="/login.js"></script>
+<script src="/install.js"></script>
+</body>
+</html>

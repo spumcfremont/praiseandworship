@@ -1,0 +1,11 @@
+node_modules/
+.netlify/
+.DS_Store
+.env
+
+# Local test data and downloads: never committed
+dev/songs.json
+dev/setlists.json
+dev/*.tmp
+dev/drive-import/
+client_secret*.json
