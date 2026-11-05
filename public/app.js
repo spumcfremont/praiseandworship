@@ -34,6 +34,20 @@
     return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
   }
 
+  // How to draw a song's chords. The sheet may be written in capo shapes: "key" is what the band
+  // sounds in, "capo" says how far the written shapes sit below it. By default everyone sees the
+  // real chords (piano, bass); guitarists can switch to the capo shapes.
+  function chordOpts(song, shift, shapes) {
+    const base = song.key || CP.parse(song.body).meta.key || "";
+    const capo = song.capo || 0;
+    const target = CP.transposeKey(base, shift);
+    const showShapes = !!(shapes && capo);
+    const shapeKey = capo && target ? CP.transposeKey(target, -capo) : "";
+    const shown = showShapes ? shapeKey : target;
+    const flats = base ? CP.prefersFlats(shown) : /[A-G]b/.test(song.body);
+    return { base, target, capo, showShapes, shapeKey, flats, transpose: shift + (showShapes ? 0 : capo) };
+  }
+
   const byTitle = (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
 
   function shortDate(iso) {
@@ -402,7 +416,7 @@
               const { song } = await api("/api/songs", {
                 method: "POST",
                 body: {
-                  title: old.title, artist: old.artist, key: old.key, tempo: old.tempo, time: old.time,
+                  title: old.title, artist: old.artist, key: old.key, tempo: old.tempo, time: old.time, capo: old.capo,
                   tags: old.tags, link: old.link, notes: old.notes, body: old.body, sung: old.sung,
                 },
               });
@@ -421,7 +435,7 @@
           if (existing.has(title.toLowerCase())) { skipped.push(`${title} (already in the songbook)`); continue; }
           const { song } = await api("/api/songs", {
             method: "POST",
-            body: { title, artist: meta.artist || "", key: meta.key || "", tempo: meta.tempo || "", time: meta.time || "", body },
+            body: { title, artist: meta.artist || "", key: meta.key || "", tempo: meta.tempo || "", time: meta.time || "", capo: parseInt(meta.capo, 10) || 0, body },
           });
           upsert(song);
           existing.add(title.toLowerCase());
@@ -478,20 +492,20 @@
         ? `<a class="btn" href="#/set/${encodeURIComponent(next.id)}" title="Open that set">✓ In ${esc(shortDate(next.date))} set</a>`
         : `<button class="btn" data-act="addset" type="button">+ Add to ${esc(shortDate(next.date))} set</button>`;
     };
-    const baseKey = () => song.key || CP.parse(song.body).meta.key || "";
+    const opts = () => chordOpts(song, shift, prefs.get("pw-shapes", false));
 
     function sheetHtml() {
-      const key = baseKey();
-      const target = CP.transposeKey(key, shift);
-      const flats = key ? CP.prefersFlats(target) : /[A-G]b/.test(song.body);
-      return CP.render(song.body, { transpose: shift, flats });
+      const o = opts();
+      return CP.render(song.body, { transpose: o.transpose, flats: o.flats });
     }
 
     function keyLabel() {
-      const key = baseKey();
-      if (!shift) return key ? `<small>Key</small>${esc(key)}` : `<small>Transpose</small>0`;
+      const o = opts();
+      const key = o.base;
+      const shapes = o.showShapes ? ` <small>${esc(o.shapeKey)} shapes</small>` : "";
+      if (!shift) return key ? `<small>Key</small>${esc(key)}${shapes}` : `<small>Transpose</small>0`;
       const sign = shift > 0 ? `+${shift}` : `${shift}`;
-      return key ? `<small>${esc(key)} → </small>${esc(CP.transposeKey(key, shift))}` : `<small>Transpose</small>${sign}`;
+      return key ? `<small>${esc(key)} → </small>${esc(o.target)}${shapes}` : `<small>Transpose</small>${sign}`;
     }
 
     function draw() {
@@ -499,6 +513,7 @@
       const sung = song.sung || [];
       const meta = [
         song.key && `<span class="pill">Our key <b>${esc(song.key)}</b></span>`,
+        song.capo && `<span class="pill">Guitar: capo <b>${song.capo}</b>${song.key ? `, ${esc(CP.transposeKey(song.key, -song.capo))} shapes` : ""}</span>`,
         song.tempo && `<span class="pill">Tempo <b>${esc(song.tempo)}</b></span>`,
         song.time && `<span class="pill">Time <b>${esc(song.time)}</b></span>`,
         ...(song.tags || []).map((t) => `<span class="pill">${esc(t)}</span>`),
@@ -544,6 +559,7 @@
             <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           </div>
           <button class="btn" data-act="chords" type="button" aria-pressed="${view.chords}">Chords</button>
+          ${song.capo ? `<button class="btn" data-act="shapes" type="button" aria-pressed="${prefs.get("pw-shapes", false)}" title="Show the chords guitar plays with the capo on">Capo shapes</button>` : ""}
           <button class="btn hide-sm" data-act="cols" type="button" aria-pressed="${view.cols}" title="Two columns on wide screens">Columns</button>
           ${wakeSupported ? `<button class="btn" data-act="wake" type="button" aria-pressed="${!!wakeLock}" title="Stop the screen from dimming">Keep awake</button>` : ""}
           <div class="spacer"></div>
@@ -619,6 +635,14 @@
           btn.setAttribute("aria-pressed", view.chords);
           prefs.set("pw-view", view);
           break;
+        case "shapes": {
+          const on = !prefs.get("pw-shapes", false);
+          prefs.set("pw-shapes", on);
+          btn.setAttribute("aria-pressed", on);
+          redrawSheet();
+          toast(on ? `Showing capo ${song.capo} shapes for guitar.` : "Showing the real chords (piano, bass).");
+          break;
+        }
         case "cols":
           view.cols = !view.cols;
           sheet.classList.toggle("cols", view.cols);
@@ -717,10 +741,7 @@
   }
 
   function keyFor(song, shift) {
-    const base = song.key || CP.parse(song.body).meta.key || "";
-    const target = CP.transposeKey(base, shift);
-    const flats = base ? CP.prefersFlats(target) : /[A-G]b/.test(song.body);
-    return { base, target, flats };
+    return chordOpts(song, shift, false);
   }
 
   async function planSet() {
@@ -776,7 +797,11 @@
       if (!shift) return k.base ? `<small>Key</small>${esc(k.base)}` : `<small>Transpose</small>0`;
       return k.base ? `<small>${esc(k.base)} →</small>${esc(k.target)}` : `<small>Transpose</small>${shift > 0 ? "+" : ""}${shift}`;
     };
-    const sheetHtml = (song, shift) => CP.render(song.body, { transpose: shift, flats: keyFor(song, shift).flats });
+    const sheetHtml = (song, shift) => {
+      const o = chordOpts(song, shift, prefs.get("pw-shapes", false));
+      return CP.render(song.body, { transpose: o.transpose, flats: o.flats });
+    };
+    const anyCapo = () => set.items.some((it) => (songOf(it) || {}).capo);
 
     function draw() {
       document.title = `${fullDate(set.date)} set · Praise & Worship`;
@@ -799,6 +824,7 @@
             <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           </div>
           <button class="btn" data-act="chords" type="button" aria-pressed="${view.chords}">Chords</button>
+          ${anyCapo() ? `<button class="btn" data-act="shapes" type="button" aria-pressed="${prefs.get("pw-shapes", false)}">Capo shapes</button>` : ""}
         </div>
         ${set.items.length ? `
           <nav class="set-jump no-print" aria-label="Songs in this set">
@@ -819,9 +845,9 @@
                 <span class="ss-n">${i + 1}</span>
                 <div class="ss-title">
                   <h2><a href="#/song/${encodeURIComponent(song.id)}">${esc(song.title)}</a></h2>
-                  ${song.artist ? `<p>${esc(song.artist)}</p>` : ""}
+                  ${song.artist || song.capo ? `<p>${esc([song.artist, song.capo && `Guitar capo ${song.capo}`].filter(Boolean).join(" · "))}</p>` : ""}
                 </div>
-                <span class="ss-printkey">${keyFor(song, it.shift).target ? `Key: ${esc(keyFor(song, it.shift).target)}` : ""}</span>
+                <span class="ss-printkey">${keyFor(song, it.shift).target ? `Key: ${esc(keyFor(song, it.shift).target)}` : ""}${song.capo ? ` · capo ${song.capo}` : ""}</span>
               </header>
               <div class="ss-tools no-print">
                 <div class="toolgroup" role="group" aria-label="Key for this set">
@@ -908,6 +934,13 @@
             filename: `lyrics-${set.date}`,
             toast,
           });
+          break;
+        }
+        case "shapes": {
+          const on = !prefs.get("pw-shapes", false);
+          prefs.set("pw-shapes", on);
+          draw();
+          toast(on ? "Showing capo shapes for guitar." : "Showing the real chords (piano, bass).");
           break;
         }
         case "prev": jump(Math.max(0, currentIndex() - 1)); break;
@@ -1178,6 +1211,9 @@ Was [Em]blind but [D]now I [G]see`;
           <div class="f-key"><label for="f-key">Our key</label><input id="f-key" name="key" list="keys" maxlength="12" value="${esc(s.key)}" placeholder="G"></div>
           <div class="f-tempo"><label for="f-tempo">Tempo</label><input id="f-tempo" name="tempo" maxlength="20" value="${esc(s.tempo)}" placeholder="72 bpm"></div>
           <div class="f-time"><label for="f-time">Time</label><input id="f-time" name="time" maxlength="12" value="${esc(s.time)}" placeholder="4/4"></div>
+          <div class="f-capo"><label for="f-capo">Guitar capo</label><select id="f-capo" name="capo">
+            ${Array.from({ length: 10 }, (_, n) => `<option value="${n}"${(s.capo || 0) === n ? " selected" : ""}>${n ? `Capo ${n}` : "No capo"}</option>`).join("")}
+          </select></div>
           <div class="f-tags"><label for="f-tags">Tags</label><input id="f-tags" name="tags" value="${esc((s.tags || []).join(", "))}" placeholder="Advent, Communion, Upbeat"><p class="hint">Separate with commas.</p></div>
           <div class="f-link"><label for="f-link">Reference link</label><input id="f-link" name="link" type="url" maxlength="500" value="${esc(s.link)}" placeholder="https://youtube.com/…"></div>
           <div class="f-sung"><label for="f-sung">Dates we sang it</label><input id="f-sung" name="sung" value="${esc((s.sung || []).join(", "))}" placeholder="2026-10-26, 2026-09-14"><p class="hint">Year-month-day, separated with commas.</p></div>
@@ -1191,6 +1227,7 @@ Was [Em]blind but [D]now I [G]see`;
               <label for="f-body">Lyrics &amp; chords</label>
               <button class="btn" type="button" id="convert" title="For sheets with the chords on their own line above the words">Line up chords</button>
             </div>
+            <div class="keycheck" id="keycheck" hidden></div>
             <textarea id="f-body" name="body" spellcheck="false" placeholder="${esc(EXAMPLE)}">${esc(s.body)}</textarea>
             <details class="help">
               <summary>How to write chords</summary>
@@ -1228,7 +1265,51 @@ Was [Em]blind but [D]now I [G]see`;
 
     const preview = () => {
       $preview.innerHTML = $body.value.trim() ? CP.render($body.value) : `<p class="hint">Your chord sheet will show up here.</p>`;
+      checkKey();
     };
+
+    // Warn when the chords don't match "Our key" (e.g. a capo sheet), with one-tap fixes.
+    const $check = document.getElementById("keycheck");
+    function checkKey() {
+      const key = F.key.value.trim();
+      const capo = Number(F.capo.value) || 0;
+      const written = CP.guessKey($body.value);
+      const expected = key && CP.parseKey(key) ? CP.transposeKey(key, -capo) : "";
+      if (!written || !expected || CP.sameKey(written, expected)) { $check.hidden = true; return; }
+      const wc = CP.keyCenter(written), kc = CP.keyCenter(key);
+      const capoFit = (kc - wc + 12) % 12;
+      $check.hidden = false;
+      $check.innerHTML = `
+        <p>These chords look like they're in <b>${esc(written)}</b>, but Our key is <b>${esc(key)}</b>${capo ? ` with capo ${capo}` : ""}.
+        Piano and bass would read the wrong chords.</p>
+        <div class="kc-btns">
+          <button type="button" class="btn" data-fix="rewrite">Rewrite chords in ${esc(expected)}</button>
+          ${capoFit >= 1 && capoFit <= 9 ? `<button type="button" class="btn" data-fix="capo" data-n="${capoFit}">Guitar plays capo ${capoFit}</button>` : ""}
+          <button type="button" class="btn" data-fix="key">Our key is ${esc(CP.transposeKey(written, capo))}</button>
+        </div>`;
+    }
+    $check.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-fix]");
+      if (!b) return;
+      const key = F.key.value.trim();
+      const capo = Number(F.capo.value) || 0;
+      const written = CP.guessKey($body.value);
+      if (b.dataset.fix === "rewrite") {
+        const expected = CP.transposeKey(key, -capo);
+        const n = (CP.keyCenter(expected) - CP.keyCenter(written) + 12) % 12;
+        $body.value = CP.transposeText($body.value, n > 6 ? n - 12 : n, CP.prefersFlats(expected));
+        toast(`Chords rewritten in ${expected}.`);
+      } else if (b.dataset.fix === "capo") {
+        F.capo.value = b.dataset.n;
+        toast(`Saved as capo ${b.dataset.n}. Everyone sees the real chords; guitar can switch to capo shapes.`);
+      } else {
+        F.key.value = CP.transposeKey(written, capo);
+      }
+      state.dirty = true;
+      preview();
+    });
+    F.key.addEventListener("input", checkKey);
+    F.capo.addEventListener("change", checkKey);
     preview();
 
     function fillFromMeta(text) {
@@ -1236,6 +1317,8 @@ Was [Em]blind but [D]now I [G]see`;
       for (const f of ["title", "artist", "key", "tempo", "time"]) {
         if (meta[f] && !F[f].value.trim()) F[f].value = meta[f];
       }
+      const capo = parseInt(meta.capo, 10);
+      if (capo > 0 && capo < 10 && F.capo.value === "0") F.capo.value = String(capo);
     }
 
     form.addEventListener("input", () => { state.dirty = true; });
@@ -1276,7 +1359,11 @@ Was [Em]blind but [D]now I [G]see`;
       let text = lines.join("\n").replace(/^\n+/, "");
       if (CP.looksLikeChordsOverLyrics(text)) text = CP.toChordPro(text);
       $body.value = text;
-      for (const [f, v] of [["title", found.title], ["artist", found.artist], ["key", found.key], ["link", found.url]]) {
+      if (found.capo) F.capo.value = String(found.capo);
+      // The key the band sounds in = key of the written chords + capo.
+      const written = CP.guessKey(text);
+      const soundingKey = written ? CP.transposeKey(written, found.capo || 0) : found.key;
+      for (const [f, v] of [["title", found.title], ["artist", found.artist], ["key", soundingKey], ["link", found.url]]) {
         if (v && !F[f].value.trim()) F[f].value = v;
       }
       fillFromMeta(text);
@@ -1346,6 +1433,7 @@ Was [Em]blind but [D]now I [G]see`;
       const v = (n) => F[n].value.trim();
       return {
         title: v("title"), artist: v("artist"), key: v("key"), tempo: v("tempo"), time: v("time"),
+        capo: Number(F.capo.value) || 0,
         link: v("link"), notes: F.notes.value.trim(), body: $body.value,
         tags: v("tags").split(",").map((t) => t.trim()).filter(Boolean),
         sung: v("sung").split(/[,\s]+/).filter(Boolean),

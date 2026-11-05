@@ -122,8 +122,12 @@ def get_ug(url):
     if not c:
         raise Exception("That page doesn't have a chord sheet we can read")
     t = d.get("tab") or {}
+    try:
+        capo = max(0, min(11, int((d.get("tab_view") or {}).get("meta", {}).get("capo") or 0)))
+    except (TypeError, ValueError):
+        capo = 0
     return {"source": "Ultimate Guitar", "title": t.get("song_name", ""), "artist": t.get("artist_name", ""),
-            "key": t.get("tonality_name") or "", "text": html.unescape(clean_ug(c)), "url": url}
+            "key": t.get("tonality_name") or "", "capo": capo, "text": html.unescape(clean_ug(c)), "url": url}
 
 
 def search_hymnary(q):

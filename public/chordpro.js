@@ -247,9 +247,61 @@
     return out.join("\n");
   }
 
+  // Rewrite every [chord] in a sheet n half steps up (section labels like [Verse] are left alone).
+  function transposeText(text, n, flats) {
+    return String(text).replace(/\[([^\]]+)\]/g, (m, c) => (isChord(c) ? `[${transposeChord(c.trim(), n, flats)}]` : m));
+  }
+
+  // Best guess at the key the chords are written in: scores every key by how well the chords
+  // fit its scale, with extra weight on the first and last chord (songs usually start/end on "home").
+  function guessKey(text) {
+    const chords = [];
+    for (const it of parse(text).items) {
+      if (it.type !== "line") continue;
+      for (const s of it.segments) {
+        if (!s.chord) continue;
+        const m = /^\(?([A-G][#b]?)([^/]*)/.exec(s.chord.trim());
+        if (!m || INDEX[m[1]] === undefined || !CHORD_RE.test(stripParens(s.chord.trim()))) continue;
+        chords.push({ root: INDEX[m[1]], minor: /^(m|min|-)(?!aj)/.test(m[2]) && !/^maj/.test(m[2]), dim: /dim|°|ø/.test(m[2]) });
+      }
+    }
+    if (chords.length < 2) return "";
+    const MAJ = [0, 5, 7], MIN = [2, 4, 9];
+    let best = null;
+    for (let k = 0; k < 12; k++) {
+      let score = 0;
+      for (const c of chords) {
+        const d = (c.root - k + 12) % 12;
+        if ((!c.minor && MAJ.includes(d)) || (c.minor && MIN.includes(d))) score += 2;
+        else if (MAJ.includes(d) || MIN.includes(d) || (d === 11 && c.dim)) score += 1;
+        else score -= 1;
+        if (d === 0 && !c.minor) score += 1;
+      }
+      const first = chords[0], last = chords[chords.length - 1];
+      if ((first.root - k + 12) % 12 === 0) score += 3;
+      if ((last.root - k + 12) % 12 === 0) score += 3;
+      if (!best || score > best.score) best = { k, score };
+    }
+    // Minor key if the song clearly lives on the relative minor (vi) chord.
+    const rel = (best.k + 9) % 12;
+    const f = chords[0], l = chords[chords.length - 1];
+    if (f.root === rel && f.minor && l.root === rel && l.minor) return MINOR_KEYS[rel];
+    return MAJOR_KEYS[best.k];
+  }
+
+  // Same key center? (G and Em count as the same set of chords.)
+  function keyCenter(key) {
+    const k = parseKey(key);
+    return k ? (k.minor ? (k.index + 3) % 12 : k.index) : null;
+  }
+  function sameKey(a, b) {
+    const x = keyCenter(a), y = keyCenter(b);
+    return x !== null && x === y;
+  }
+
   root.ChordPro = {
     parse, render, plainText, transposeChord, transposeKey, prefersFlats, parseKey,
     isChord, isChordLine, isSectionLabel, looksLikeChordsOverLyrics, toChordPro,
-    MAJOR_KEYS, MINOR_KEYS, esc,
+    MAJOR_KEYS, MINOR_KEYS, esc, transposeText, guessKey, keyCenter, sameKey,
   };
 })(typeof window !== "undefined" ? window : globalThis);

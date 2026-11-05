@@ -26,6 +26,7 @@ function clean(input) {
     ? [...new Set(input.tags.map((t) => text(t, 40)).filter(Boolean))].slice(0, 30)
     : [];
   song.sung = dates(input.sung);
+  song.capo = Number.isInteger(input.capo) && input.capo > 0 && input.capo < 12 ? input.capo : 0;
   if (song.link && !/^https?:\/\//i.test(song.link)) song.link = "";
   return song;
 }

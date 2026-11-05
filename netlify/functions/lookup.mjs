@@ -81,6 +81,7 @@ async function getUG(url) {
     title: data.tab?.song_name || "",
     artist: data.tab?.artist_name || "",
     key: data.tab?.tonality_name || "",
+    capo: Math.max(0, Math.min(11, parseInt(data.tab_view?.meta?.capo, 10) || 0)),
     text: decodeEntities(cleanUG(content)),
     url,
   };

@@ -621,3 +621,11 @@ html.standalone body::before {
   content: ""; position: fixed; z-index: 50; top: 0; left: 0; right: 0; height: var(--sat); background: #5a1750;
 }
 @media print { html.standalone body::before { display: none; } }
+
+/* ---------- Key check (editor) ---------- */
+.keycheck { margin: 0 0 10px; padding: 12px 14px; border-radius: 12px; background: #fff4e5; border: 1px solid #f2c48d; color: #5c3a00; font-size: 14.5px; }
+.keycheck p { margin: 0 0 10px; }
+.kc-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.kc-btns .btn { min-height: 36px; font-size: 13.5px; }
+:root[data-theme="dark"] .keycheck { background: #3a2a12; border-color: #7a5520; color: #ffe2b8; }
+.grid .f-capo { grid-column: span 1; }
