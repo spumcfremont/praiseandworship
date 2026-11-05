@@ -147,6 +147,14 @@
   window.addEventListener("orientationchange", syncTopbar);
   if (topbar && "ResizeObserver" in window) new ResizeObserver(syncTopbar).observe(topbar);
 
+  // Tap a chord name in any song to see how to play it.
+  document.addEventListener("click", (e) => {
+    const ch = e.target.closest(".sheet .ch");
+    if (!ch || !ch.textContent.trim() || !window.ChordHelp) return;
+    if (String(window.getSelection && window.getSelection()).trim()) return; // selecting text, not tapping
+    if (window.ChordHelp.open(ch.textContent.trim())) e.stopPropagation();
+  }, true);
+
   // ---------- Theme & sign out ----------
   const themeBtn = document.getElementById("theme");
   const THEME_ICONS = { auto: "◐", light: "☀", dark: "☾" };
@@ -237,10 +245,102 @@
     document.addEventListener(ev, () => { if (!fsElement() && stage.on && stage.fs) { stage.fs = false; setStage(false); } });
   }
 
+  // ---------- Autoscroll ----------
+  // ctx = { key(): which song is on screen, estimate(): px/second that plays that song in about its length }
+  const auto = { on: false, raf: 0, last: 0, acc: 0, ctx: null, wakeBefore: false };
+  const ctl = document.createElement("div");
+  ctl.className = "scroll-ctl no-print";
+  ctl.hidden = true;
+  document.body.appendChild(ctl);
+
+  // Default speed: a song lasts about 4 minutes, scaled by its tempo if we know it.
+  function estimateSpeed(el, song) {
+    const h = el ? el.getBoundingClientRect().height : 1500;
+    const bpm = parseInt(song && song.tempo, 10);
+    const secs = bpm > 30 && bpm < 240 ? Math.min(360, Math.max(150, (240 * 72) / bpm)) : 240;
+    return Math.min(120, Math.max(6, (h - window.innerHeight * 0.4) / secs));
+  }
+  const autoKey = () => (auto.ctx ? `pw-scroll-${auto.ctx.key()}` : "");
+  const autoSpeed = () => (auto.ctx ? prefs.get(autoKey(), 0) || auto.ctx.estimate() : 0);
+
+  function drawCtl() {
+    if (!auto.ctx) { ctl.hidden = true; return; }
+    const mult = autoSpeed() / auto.ctx.estimate();
+    ctl.hidden = false;
+    ctl.classList.toggle("playing", auto.on);
+    ctl.innerHTML = `
+      <button type="button" class="btn icon" data-auto="slower" aria-label="Scroll slower">−</button>
+      <button type="button" class="btn icon sc-play" data-auto="toggle" aria-label="${auto.on ? "Pause autoscroll" : "Start autoscroll"}">${auto.on ? "❚❚" : "▶"}</button>
+      <button type="button" class="btn icon" data-auto="faster" aria-label="Scroll faster">+</button>
+      <span class="sc-speed" aria-live="polite">${mult.toFixed(1)}×</span>
+      ${auto.on ? "" : `<button type="button" class="btn icon ghost" data-auto="close" aria-label="Hide autoscroll">✕</button>`}`;
+  }
+
+  function tick(ts) {
+    if (!auto.on) return;
+    // Hold still while a chord pop-up or the lyrics dialog is open.
+    if (auto.last && !document.querySelector("dialog[open]")) {
+      const dt = Math.min(0.1, (ts - auto.last) / 1000);
+      auto.acc += autoSpeed() * dt;
+      const step = Math.floor(auto.acc);
+      if (step >= 1) { auto.acc -= step; window.scrollBy(0, step); }
+      if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2) {
+        stopAuto();
+        toast("That's the end.");
+        return;
+      }
+    }
+    auto.last = ts;
+    auto.raf = requestAnimationFrame(tick);
+  }
+
+  function startAuto(ctx) {
+    if (ctx) auto.ctx = ctx;
+    if (!auto.ctx || auto.on) return;
+    auto.on = true;
+    auto.last = 0;
+    auto.acc = 0;
+    auto.wakeBefore = !!wakeLock;
+    setWake(true);
+    drawCtl();
+    auto.raf = requestAnimationFrame(tick);
+  }
+
+  function stopAuto(hide) {
+    if (auto.on) {
+      auto.on = false;
+      cancelAnimationFrame(auto.raf);
+      if (!auto.wakeBefore && !stage.on) setWake(false);
+    }
+    if (hide) auto.ctx = null;
+    drawCtl();
+  }
+
+  ctl.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-auto]");
+    if (!b || !auto.ctx) return;
+    const act = b.dataset.auto;
+    if (act === "toggle") return auto.on ? stopAuto() : startAuto();
+    if (act === "close") return stopAuto(true);
+    const next = Math.min(150, Math.max(3, autoSpeed() * (act === "faster" ? 1.15 : 1 / 1.15)));
+    prefs.set(autoKey(), next); // remembered for this song on this phone
+    drawCtl();
+  });
+
+  // Space bar (or a Bluetooth page-turner set to space) starts/pauses when a song or set is open.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== " " || e.repeat || !auto.ctx) return;
+    if (e.target.closest && e.target.closest("input, textarea, select, button, [contenteditable]")) return;
+    e.preventDefault();
+    auto.on ? stopAuto() : startAuto();
+  });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && auto.on) stopAuto(); });
+
   // ---------- Router ----------
   async function route() {
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
     if (stage.on) await setStage(false);
+    stopAuto(true);
     if (parts[0] !== "song") setWake(false);
     try {
       setNav(!parts.length || parts[0] === "song" || parts[0] === "set" ? "songs" : parts[0] === "stats" ? "stats" : "");
@@ -505,8 +605,14 @@
       const shapes = o.showShapes ? ` <small>${esc(o.shapeKey)} shapes</small>` : "";
       if (!shift) return key ? `<small>Key</small>${esc(key)}${shapes}` : `<small>Transpose</small>0`;
       const sign = shift > 0 ? `+${shift}` : `${shift}`;
-      return key ? `<small>${esc(key)} → </small>${esc(o.target)}${shapes}` : `<small>Transpose</small>${sign}`;
+      // Changed from the original: say what it was, and that a tap brings it back.
+      return key
+        ? `<small>was ${esc(key)} ↺</small>${esc(o.target)}${shapes}`
+        : `<small>was 0 ↺</small>${sign}`;
     }
+    const keyBtn = (extra = "") =>
+      `<button type="button" class="keyout${shift ? " changed" : ""}" data-act="reset" ${shift ? "" : "disabled"} ${extra}
+        aria-label="${shift ? `Transposed from the original key. Tap to go back to ${esc(opts().base || "the original")}` : "Original key"}">${keyLabel()}</button>`;
 
     function draw() {
       document.title = `${song.title} · Praise & Worship`;
@@ -551,7 +657,7 @@
         <div class="toolbar">
           <div class="toolgroup" role="group" aria-label="Transpose">
             <button class="btn icon" data-act="down" type="button" aria-label="Transpose down a half step">−</button>
-            <output class="keyout" aria-live="polite">${keyLabel()}</output>
+            ${keyBtn('aria-live="polite"')}
             <button class="btn icon" data-act="up" type="button" aria-label="Transpose up a half step">+</button>
           </div>
           <div class="toolgroup" role="group" aria-label="Text size">
@@ -563,6 +669,7 @@
           <button class="btn hide-sm" data-act="cols" type="button" aria-pressed="${view.cols}" title="Two columns on wide screens">Columns</button>
           ${wakeSupported ? `<button class="btn" data-act="wake" type="button" aria-pressed="${!!wakeLock}" title="Stop the screen from dimming">Keep awake</button>` : ""}
           <div class="spacer"></div>
+          <button class="btn" data-act="autoscroll" type="button" title="Scroll the song by itself (space bar works too)">▶ Autoscroll</button>
           <button class="btn primary" data-act="stage" type="button" title="Fill the screen with just the song">⛶ Fullscreen</button>
           <button class="btn" data-act="print" type="button">Print</button>
           <button class="btn" data-act="lyrics" type="button">Lyrics only</button>
@@ -574,12 +681,13 @@
 
         <div class="stage-bar" id="stagebar" role="toolbar" aria-label="Fullscreen controls">
           <button class="btn icon" data-act="down" type="button" aria-label="Transpose down">−</button>
-          <output class="keyout">${keyLabel()}</output>
+          ${keyBtn()}
           <button class="btn icon" data-act="up" type="button" aria-label="Transpose up">+</button>
           <span class="sep" aria-hidden="true"></span>
           <button class="btn icon" data-act="smaller" type="button" aria-label="Smaller text">A−</button>
           <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           <span class="sep" aria-hidden="true"></span>
+          <button class="btn icon" data-act="autoscroll" type="button" aria-label="Autoscroll">▶</button>
           <button class="btn" data-act="stage" type="button">Exit</button>
         </div>`;
     }
@@ -602,7 +710,12 @@
 
     function redrawSheet() {
       document.getElementById("sheet").innerHTML = sheetHtml();
-      document.querySelectorAll(".keyout").forEach((o) => { o.innerHTML = keyLabel(); });
+      document.querySelectorAll(".keyout").forEach((o) => {
+        o.innerHTML = keyLabel();
+        o.classList.toggle("changed", !!shift);
+        o.disabled = !shift;
+        o.setAttribute("aria-label", shift ? `Transposed from the original key. Tap to go back to ${opts().base || "the original"}` : "Original key");
+      });
     }
 
     async function patch(body) {
@@ -618,6 +731,17 @@
       if (!btn) return;
       const sheet = document.getElementById("sheet");
       switch (btn.dataset.act) {
+        case "autoscroll":
+          if (auto.on) stopAuto();
+          else startAuto({ key: () => song.id, estimate: () => estimateSpeed(document.getElementById("sheet"), song) });
+          break;
+        case "reset":
+          if (!shift) break;
+          shift = 0;
+          prefs.set(`pw-tr-${id}`, 0);
+          redrawSheet();
+          toast(`Back to the original key${opts().base ? `, ${opts().base}` : ""}.`);
+          break;
         case "up": case "down":
           shift = (((shift + (btn.dataset.act === "up" ? 1 : -1)) % 12) + 12) % 12;
           if (shift > 6) shift -= 12;
@@ -684,6 +808,9 @@
     };
     draw();
     wireSung();
+    if (shift && opts().base) {
+      toast(`Showing in ${opts().target}, the key you moved it to last time (original ${opts().base}). Tap the key to go back.`);
+    }
   }
 
   // ---------- Set lists ----------
@@ -795,8 +922,10 @@
     const keyHtml = (song, shift) => {
       const k = keyFor(song, shift);
       if (!shift) return k.base ? `<small>Key</small>${esc(k.base)}` : `<small>Transpose</small>0`;
-      return k.base ? `<small>${esc(k.base)} →</small>${esc(k.target)}` : `<small>Transpose</small>${shift > 0 ? "+" : ""}${shift}`;
+      return k.base ? `<small>was ${esc(k.base)} ↺</small>${esc(k.target)}` : `<small>was 0 ↺</small>${shift > 0 ? "+" : ""}${shift}`;
     };
+    const setKeyLabel = (song, shift) =>
+      shift ? `Set key changed from the original. Tap to go back to ${keyFor(song, 0).base || "the original"} for everyone` : "Original key";
     const sheetHtml = (song, shift) => {
       const o = chordOpts(song, shift, prefs.get("pw-shapes", false));
       return CP.render(song.body, { transpose: o.transpose, flats: o.flats });
@@ -815,6 +944,7 @@
         </header>
         ${set.notes ? `<div class="notes"><strong>Notes for this service</strong>${esc(set.notes)}</div>` : ""}
         <div class="set-tools no-print">
+          <button class="btn" data-act="autoscroll" type="button" title="Scroll through the set by itself (space bar works too)">▶ Autoscroll</button>
           <button class="btn primary" data-act="stage" type="button">⛶ Fullscreen</button>
           <button class="btn" data-act="print" type="button">Print all</button>
           <button class="btn" data-act="lyrics" type="button">Lyrics only</button>
@@ -852,7 +982,7 @@
               <div class="ss-tools no-print">
                 <div class="toolgroup" role="group" aria-label="Key for this set">
                   <button class="btn icon" data-act="down" data-i="${i}" type="button" aria-label="Transpose down">−</button>
-                  <output class="ss-key" id="k-${i}">${keyHtml(song, it.shift)}</output>
+                  <button type="button" class="ss-key keyout${it.shift ? " changed" : ""}" id="k-${i}" data-act="reset" data-i="${i}" ${it.shift ? "" : "disabled"} aria-label="${esc(setKeyLabel(song, it.shift))}">${keyHtml(song, it.shift)}</button>
                   <button class="btn icon" data-act="up" data-i="${i}" type="button" aria-label="Transpose up">+</button>
                 </div>
                 <a class="btn" href="#/edit/${encodeURIComponent(song.id)}">Edit</a>
@@ -869,6 +999,7 @@
           <button class="btn icon" data-act="smaller" type="button" aria-label="Smaller text">A−</button>
           <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           <span class="sep" aria-hidden="true"></span>
+          <button class="btn icon" data-act="autoscroll" type="button" aria-label="Autoscroll">▶</button>
           <button class="btn" data-act="stage" type="button">Exit</button>
         </div>`;
     }
@@ -896,6 +1027,30 @@
       if (!btn) return;
       const i = Number(btn.dataset.i);
       switch (btn.dataset.act) {
+        case "autoscroll": {
+          if (auto.on) { stopAuto(); break; }
+          // Each song in the set keeps its own speed; it switches as you scroll into the next song.
+          const cur = () => songOf(set.items[currentIndex()] || set.items[0]) || {};
+          startAuto({
+            key: () => cur().id || "set",
+            estimate: () => estimateSpeed(document.getElementById(`sheet-${currentIndex()}`), cur()),
+          });
+          break;
+        }
+        case "reset": {
+          const it = set.items[i];
+          if (!it || !it.shift) break;
+          it.shift = 0;
+          const song = songOf(it);
+          document.getElementById(`sheet-${i}`).innerHTML = sheetHtml(song, 0);
+          const kb = document.getElementById(`k-${i}`);
+          kb.innerHTML = keyHtml(song, 0);
+          kb.classList.remove("changed");
+          kb.disabled = true;
+          queueSave();
+          toast(`${song.title} is back in ${keyFor(song, 0).base || "its original key"} for this set.`);
+          break;
+        }
         case "up": case "down": {
           const it = set.items[i];
           let shift = (((it.shift + (btn.dataset.act === "up" ? 1 : -1)) % 12) + 12) % 12;
@@ -903,7 +1058,11 @@
           it.shift = shift;
           const song = songOf(it);
           document.getElementById(`sheet-${i}`).innerHTML = sheetHtml(song, shift);
-          document.getElementById(`k-${i}`).innerHTML = keyHtml(song, shift);
+          const kb = document.getElementById(`k-${i}`);
+          kb.innerHTML = keyHtml(song, shift);
+          kb.classList.toggle("changed", !!shift);
+          kb.disabled = !shift;
+          kb.setAttribute("aria-label", setKeyLabel(song, shift));
           queueSave();
           break;
         }
