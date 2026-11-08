@@ -34,18 +34,46 @@
     return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
   }
 
+  // Who's holding this phone: "keys" (keys, bass, vocals) or "guitar". Guitarists see capo shapes.
+  const role = () => prefs.get("pw-role", "");
+  const isGuitar = () => role() === "guitar";
+  // The banner a guitarist sees on a capo song: "Capo 4 · play G shapes".
+  function capoBanner(song, shift) {
+    const o = chordOpts(song, shift, true);
+    if (!o.songCapo) return "";
+    const moved = shift && o.capo !== o.songCapo;
+    return `<div class="capo-banner"><span class="cb-icon" aria-hidden="true">🎸</span>
+      <span><b>${o.capo ? `Capo ${o.capo}` : "No capo"}</b>${o.shapeKey ? ` · play <b>${esc(o.shapeKey)}</b> shapes` : ""}</span>
+      ${o.target ? `<small>sounds in ${esc(o.target)}${moved ? ` (capo moved for the new key; the sheet says capo ${o.songCapo} in ${esc(o.base)})` : ""}</small>` : ""}</div>`;
+  }
+  // Quiet note for everyone else.
+  const capoNote = (song) => (song.capo ? `<span class="pill pill-quiet">Guitar uses capo ${song.capo}</span>` : "");
+
   // How to draw a song's chords. The sheet may be written in capo shapes: "key" is what the band
   // sounds in, "capo" says how far the written shapes sit below it. By default everyone sees the
   // real chords (piano, bass); guitarists can switch to the capo shapes.
+  // Easy open-chord shapes for guitar: G, C, D, A, E (Em, Am… count as their relative majors).
+  const EASY_SHAPES = [7, 0, 2, 9, 4];
+  function bestCapo(targetKey, preferred) {
+    const kc = CP.keyCenter(targetKey);
+    if (kc === null) return preferred;
+    const easy = (c) => EASY_SHAPES.includes((kc - c + 12) % 12);
+    if (easy(preferred)) return preferred;
+    for (let c = 0; c <= 7; c++) if (easy(c)) return c;
+    return preferred;
+  }
+
   function chordOpts(song, shift, shapes) {
     const base = song.key || CP.parse(song.body).meta.key || "";
-    const capo = song.capo || 0;
+    const songCapo = song.capo || 0;
     const target = CP.transposeKey(base, shift);
-    const showShapes = !!(shapes && capo);
-    const shapeKey = capo && target ? CP.transposeKey(target, -capo) : "";
+    const showShapes = !!(shapes && songCapo);
+    // Transposed? Move the capo so guitar keeps easy shapes (e.g. capo 2 song moved to C = no capo, C shapes).
+    const capo = showShapes && shift && target ? bestCapo(target, songCapo) : songCapo;
+    const shapeKey = songCapo && target ? CP.transposeKey(target, -capo) : "";
     const shown = showShapes ? shapeKey : target;
     const flats = base ? CP.prefersFlats(shown) : /[A-G]b/.test(song.body);
-    return { base, target, capo, showShapes, shapeKey, flats, transpose: shift + (showShapes ? 0 : capo) };
+    return { base, target, capo, songCapo, showShapes, shapeKey, flats, transpose: shift + songCapo - (showShapes ? capo : 0) };
   }
 
   const byTitle = (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
@@ -154,6 +182,55 @@
     if (String(window.getSelection && window.getSelection()).trim()) return; // selecting text, not tapping
     if (window.ChordHelp.open(ch.textContent.trim())) e.stopPropagation();
   }, true);
+
+  // ---------- "I play" ----------
+  const roleBtn = document.getElementById("role");
+  function drawRole() {
+    if (!roleBtn) return;
+    const g = isGuitar();
+    roleBtn.innerHTML = `<span aria-hidden="true">${g ? "🎸" : "🎹"}</span><span class="role-label">${g ? "Guitar" : "Keys"}</span>`;
+    roleBtn.title = g ? "Showing chords for guitar (capo shapes). Tap to switch to keys." : "Showing chords for keys, bass and vocals. Tap to switch to guitar.";
+    roleBtn.setAttribute("aria-label", `I play ${g ? "guitar" : "keys, bass or vocals"}. Tap to switch.`);
+  }
+  function setRole(r, quiet) {
+    prefs.set("pw-role", r);
+    drawRole();
+    if (!quiet) toast(r === "guitar" ? "Guitar view: capo songs show the shapes you play." : "Keys view: real chords for keys, bass and vocals.");
+    if (!state.dirty) route();
+  }
+  if (roleBtn) {
+    drawRole();
+    roleBtn.addEventListener("click", () => setRole(isGuitar() ? "keys" : "guitar"));
+  }
+  // Ask once, the first time this phone opens a song (or set) that uses a capo.
+  function askRoleIfNeeded(hasCapo) {
+    if (!hasCapo || role()) return;
+    let dlg = document.getElementById("role-dialog");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.id = "role-dialog";
+      dlg.className = "lyrics-dialog role-dialog";
+      document.body.appendChild(dlg);
+    }
+    dlg.innerHTML = `
+      <form method="dialog">
+        <h2>What do you play?</h2>
+        <p class="hint">Some songs are written for guitar with a capo. We'll show you the right chords.</p>
+        <button class="btn primary" type="button" data-role="keys">🎹 Keys, bass or vocals</button>
+        <p class="fine">You'll see the real chords for the key.</p>
+        <button class="btn" type="button" data-role="guitar">🎸 Guitar</button>
+        <p class="fine">You'll see the capo and the shapes to play.</p>
+        <p class="fine">Change it anytime with the 🎹 / 🎸 button at the top.</p>
+      </form>`;
+    dlg.onclick = (e) => {
+      const b = e.target.closest("[data-role]");
+      if (!b) return;
+      dlg.close();
+      setRole(b.dataset.role, true);
+    };
+    dlg.addEventListener("cancel", () => setRole("keys", true), { once: true });
+    dlg.showModal();
+  }
 
   // ---------- Theme & sign out ----------
   const themeBtn = document.getElementById("theme");
@@ -592,7 +669,7 @@
         ? `<a class="btn" href="#/set/${encodeURIComponent(next.id)}" title="Open that set">✓ In ${esc(shortDate(next.date))} set</a>`
         : `<button class="btn" data-act="addset" type="button">+ Add to ${esc(shortDate(next.date))} set</button>`;
     };
-    const opts = () => chordOpts(song, shift, prefs.get("pw-shapes", false));
+    const opts = () => chordOpts(song, shift, isGuitar());
 
     function sheetHtml() {
       const o = opts();
@@ -619,7 +696,7 @@
       const sung = song.sung || [];
       const meta = [
         song.key && `<span class="pill">Our key <b>${esc(song.key)}</b></span>`,
-        song.capo && `<span class="pill">Guitar: capo <b>${song.capo}</b>${song.key ? `, ${esc(CP.transposeKey(song.key, -song.capo))} shapes` : ""}</span>`,
+        !isGuitar() && capoNote(song),
         song.tempo && `<span class="pill">Tempo <b>${esc(song.tempo)}</b></span>`,
         song.time && `<span class="pill">Time <b>${esc(song.time)}</b></span>`,
         ...(song.tags || []).map((t) => `<span class="pill">${esc(t)}</span>`),
@@ -651,6 +728,7 @@
         <header class="song-head">
           <h1>${esc(song.title)}</h1>
           ${song.artist ? `<p class="by">${esc(song.artist)}</p>` : ""}
+          ${isGuitar() ? `<div id="capobanner">${capoBanner(song, shift)}</div>` : ""}
           ${meta ? `<div class="meta">${meta}</div>` : ""}
           ${sungPanel}
         </header>
@@ -665,7 +743,6 @@
             <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           </div>
           <button class="btn" data-act="chords" type="button" aria-pressed="${view.chords}">Chords</button>
-          ${song.capo ? `<button class="btn" data-act="shapes" type="button" aria-pressed="${prefs.get("pw-shapes", false)}" title="Show the chords guitar plays with the capo on">Capo shapes</button>` : ""}
           <button class="btn hide-sm" data-act="cols" type="button" aria-pressed="${view.cols}" title="Two columns on wide screens">Columns</button>
           ${wakeSupported ? `<button class="btn" data-act="wake" type="button" aria-pressed="${!!wakeLock}" title="Stop the screen from dimming">Keep awake</button>` : ""}
           <div class="spacer"></div>
@@ -710,6 +787,8 @@
 
     function redrawSheet() {
       document.getElementById("sheet").innerHTML = sheetHtml();
+      const cb = document.getElementById("capobanner");
+      if (cb) cb.innerHTML = capoBanner(song, shift);
       document.querySelectorAll(".keyout").forEach((o) => {
         o.innerHTML = keyLabel();
         o.classList.toggle("changed", !!shift);
@@ -759,14 +838,6 @@
           btn.setAttribute("aria-pressed", view.chords);
           prefs.set("pw-view", view);
           break;
-        case "shapes": {
-          const on = !prefs.get("pw-shapes", false);
-          prefs.set("pw-shapes", on);
-          btn.setAttribute("aria-pressed", on);
-          redrawSheet();
-          toast(on ? `Showing capo ${song.capo} shapes for guitar.` : "Showing the real chords (piano, bass).");
-          break;
-        }
         case "cols":
           view.cols = !view.cols;
           sheet.classList.toggle("cols", view.cols);
@@ -808,6 +879,7 @@
     };
     draw();
     wireSung();
+    askRoleIfNeeded(!!song.capo);
     if (shift && opts().base) {
       toast(`Showing in ${opts().target}, the key you moved it to last time (original ${opts().base}). Tap the key to go back.`);
     }
@@ -894,7 +966,7 @@
               <li><a href="#/set/${sid}/${x.i + 1}">
                 <span class="sc-n">${n + 1}</span>
                 <span class="sc-t">${esc(x.song.title)}${x.song.artist ? `<small>${esc(x.song.artist)}</small>` : ""}</span>
-                <span class="sc-k">${esc(keyFor(x.song, x.shift).target || "")}</span>
+                <span class="sc-k">${esc(keyFor(x.song, x.shift).target || "")}${isGuitar() && x.song.capo ? `<small>capo ${x.song.capo}</small>` : ""}</span>
               </a></li>`).join("")}
           </ol>` : `<p class="sc-empty">No songs picked yet.</p>`}
         <div class="sc-actions">
@@ -927,7 +999,7 @@
     const setKeyLabel = (song, shift) =>
       shift ? `Set key changed from the original. Tap to go back to ${keyFor(song, 0).base || "the original"} for everyone` : "Original key";
     const sheetHtml = (song, shift) => {
-      const o = chordOpts(song, shift, prefs.get("pw-shapes", false));
+      const o = chordOpts(song, shift, isGuitar());
       return CP.render(song.body, { transpose: o.transpose, flats: o.flats });
     };
     const anyCapo = () => set.items.some((it) => (songOf(it) || {}).capo);
@@ -954,7 +1026,6 @@
             <button class="btn icon" data-act="bigger" type="button" aria-label="Bigger text">A+</button>
           </div>
           <button class="btn" data-act="chords" type="button" aria-pressed="${view.chords}">Chords</button>
-          ${anyCapo() ? `<button class="btn" data-act="shapes" type="button" aria-pressed="${prefs.get("pw-shapes", false)}">Capo shapes</button>` : ""}
         </div>
         ${set.items.length ? `
           <nav class="set-jump no-print" aria-label="Songs in this set">
@@ -975,10 +1046,11 @@
                 <span class="ss-n">${i + 1}</span>
                 <div class="ss-title">
                   <h2><a href="#/song/${encodeURIComponent(song.id)}">${esc(song.title)}</a></h2>
-                  ${song.artist || song.capo ? `<p>${esc([song.artist, song.capo && `Guitar capo ${song.capo}`].filter(Boolean).join(" · "))}</p>` : ""}
+                  ${song.artist || (song.capo && !isGuitar()) ? `<p>${esc([song.artist, song.capo && !isGuitar() && `Guitar uses capo ${song.capo}`].filter(Boolean).join(" · "))}</p>` : ""}
                 </div>
-                <span class="ss-printkey">${keyFor(song, it.shift).target ? `Key: ${esc(keyFor(song, it.shift).target)}` : ""}${song.capo ? ` · capo ${song.capo}` : ""}</span>
+                <span class="ss-printkey">${keyFor(song, it.shift).target ? `Key: ${esc(keyFor(song, it.shift).target)}` : ""}${song.capo ? ` · guitar ${chordOpts(song, it.shift, true).capo ? `capo ${chordOpts(song, it.shift, true).capo}` : "no capo"}` : ""}</span>
               </header>
+              ${isGuitar() ? `<div id="cb-${i}">${capoBanner(song, it.shift)}</div>` : ""}
               <div class="ss-tools no-print">
                 <div class="toolgroup" role="group" aria-label="Key for this set">
                   <button class="btn icon" data-act="down" data-i="${i}" type="button" aria-label="Transpose down">−</button>
@@ -1043,6 +1115,8 @@
           it.shift = 0;
           const song = songOf(it);
           document.getElementById(`sheet-${i}`).innerHTML = sheetHtml(song, 0);
+          const cb0 = document.getElementById(`cb-${i}`);
+          if (cb0) cb0.innerHTML = capoBanner(song, 0);
           const kb = document.getElementById(`k-${i}`);
           kb.innerHTML = keyHtml(song, 0);
           kb.classList.remove("changed");
@@ -1058,6 +1132,8 @@
           it.shift = shift;
           const song = songOf(it);
           document.getElementById(`sheet-${i}`).innerHTML = sheetHtml(song, shift);
+          const cbx = document.getElementById(`cb-${i}`);
+          if (cbx) cbx.innerHTML = capoBanner(song, shift);
           const kb = document.getElementById(`k-${i}`);
           kb.innerHTML = keyHtml(song, shift);
           kb.classList.toggle("changed", !!shift);
@@ -1095,13 +1171,6 @@
           });
           break;
         }
-        case "shapes": {
-          const on = !prefs.get("pw-shapes", false);
-          prefs.set("pw-shapes", on);
-          draw();
-          toast(on ? "Showing capo shapes for guitar." : "Showing the real chords (piano, bass).");
-          break;
-        }
         case "prev": jump(Math.max(0, currentIndex() - 1)); break;
         case "next": jump(Math.min(set.items.length - 1, currentIndex() + 1)); break;
         case "print": window.print(); break;
@@ -1110,6 +1179,7 @@
     };
 
     draw();
+    askRoleIfNeeded(anyCapo());
     if (opts.jump) setTimeout(() => jump(opts.jump - 1), 50);
     if (opts.print) {
       history.replaceState(null, "", `#/set/${sid}`);

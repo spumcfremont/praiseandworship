@@ -701,3 +701,23 @@ button.keyout.changed:hover { background: #ffdca1; }
 .scroll-ctl.playing { opacity: 0.6; }
 .scroll-ctl.playing:hover, .scroll-ctl.playing:focus-within { opacity: 1; }
 body.stage .scroll-ctl { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 62px); left: 50%; right: auto; transform: translateX(-50%); }
+
+/* ---------- "I play" switch + guitar capo banner ---------- */
+.role-btn { padding: 0 10px; gap: 5px; font-size: 13px; }
+.role-btn span[aria-hidden] { font-size: 16px; }
+@media (max-width: 420px) { .role-btn .role-label { display: none; } .role-btn { width: 40px; padding: 0; } }
+html.standalone .topbar .role-btn { color: #fff6f2; }
+.capo-banner {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 12px 0 0; padding: 12px 16px;
+  border-radius: 14px; background: #fff1d6; border: 2px solid #f0a540; color: #5c3200;
+  font: 600 18px/1.25 var(--label);
+}
+.capo-banner b { font-weight: 800; }
+.capo-banner .cb-icon { font-size: 22px; }
+.capo-banner small { flex-basis: 100%; margin-left: 32px; font: 500 13px var(--sans); color: #8a5a1a; }
+:root[data-theme="dark"] .capo-banner { background: #3e2a0e; border-color: #b9781f; color: #ffe0ad; }
+:root[data-theme="dark"] .capo-banner small { color: #f0c27a; }
+.set-song .capo-banner { margin: 0 0 12px; font-size: 16px; padding: 10px 14px; }
+.pill-quiet { border-style: dashed; }
+.sc-k small { display: block; margin-top: 3px; font: 700 10px/1 var(--label); color: #f0ae99; text-transform: uppercase; letter-spacing: 0.04em; }
+@media print { .capo-banner { background: none; border: 2px solid #000; color: #000; } }
