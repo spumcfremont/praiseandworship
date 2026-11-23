@@ -12,7 +12,12 @@
   const MINOR_KEYS = ["Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "G#m", "Am", "Bbm", "Bm"];
 
   const CHORD_RE = /^([A-G][#b]?)((?:maj|min|dim|aug|sus|add|m|M|\+|-|°|ø|Δ|\^|\d|#|b|\(|\))*)(?:\/([A-G][#b]?))?$/;
-  const NEUTRAL_RE = /^(\|+|\/|-+|->|x\d+|\d+x|\(x?\d+x?\)|%|\.{2,}|…)$/i;
+  // Things on a chord line that aren't chords: bar lines and repeat signs (| || |: :|), beat
+  // slashes, "x2", "%", "...".
+  const NEUTRAL_RE = /^(:?\|+:?|\/+|-+|->|x\d+|\d+x|\(x?\d+x?\)|%|\.{2,}|…)$/i;
+  const BAR_RE = /^(:?\|+:?|\/+|-+|\.{2,}|…)$/;
+  // A chord line's pieces, with bar lines split off the chords next to them ("|Am|F|").
+  const TOKEN_RE = /:?\|+:?|[^\s|]+/g;
   const SECTION_WORDS =
     "intro|verse|pre[- ]?chorus|chorus|post[- ]?chorus|bridge|tag|outro|interlude|instrumental|" +
     "ending|turnaround|refrain|vamp|coda|hook|breakdown|solo";
@@ -76,7 +81,7 @@
   }
 
   function isChordLine(line) {
-    const toks = String(line).trim().split(/\s+/).filter(Boolean);
+    const toks = String(line).match(TOKEN_RE) || [];
     if (!toks.length) return false;
     let chords = 0;
     for (const t of toks) {
@@ -161,6 +166,16 @@
   function renderLine(segs, n, flats) {
     const hasChords = segs.some((s) => s.chord !== null);
     if (!hasChords) return `<div class="line lyrics-only">${esc(segs.map((s) => s.text).join(""))}</div>`;
+    // A line of chords with bar lines between them ("| [G] | [C] |"): bars sit in the chord row.
+    const neutralOnly = (t) => (t.match(TOKEN_RE) || []).every((x) => NEUTRAL_RE.test(x));
+    if (segs.some((s) => s.text.trim()) && segs.every((s) => neutralOnly(s.text))) {
+      let row = "";
+      for (const s of segs) {
+        if (s.chord !== null) row += `<span class="seg"><span class="ch">${esc(transposeChord(s.chord, n, flats))}</span></span>`;
+        for (const x of s.text.match(TOKEN_RE) || []) row += `<span class="seg"><span class="ch barline">${esc(x)}</span></span>`;
+      }
+      return `<div class="line chords-only">${row}</div>`;
+    }
     const chordOnly = segs.every((s) => !s.text.trim());
     let out = "";
     for (const s of segs) {
@@ -223,16 +238,19 @@
   function toChordPro(text) {
     const lines = String(text).replace(/ /g, " ").replace(/\r\n?/g, "\n").split("\n").map(expandTabs);
     const out = [];
-    const chordTokens = (line) => [...line.matchAll(/\S+/g)].map((m) => ({ pos: m.index, tok: m[0] }));
+    const chordTokens = (line) => [...line.matchAll(TOKEN_RE)].map((m) => ({ pos: m.index, tok: m[0] }));
+    // A line of chords on its own: chords in brackets, bar lines and "x2" kept as they are.
+    const chordRow = (line) => chordTokens(line).map((c) => (isChord(c.tok) ? `[${c.tok}]` : c.tok)).join(" ");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lead = LEAD_IN_RE.exec(line);
       if (lead && isChordLine(lead[2])) {
-        out.push(lead[1].trim(), chordTokens(lead[2]).map((c) => `[${c.tok}]`).join(" "));
+        out.push(lead[1].trim(), chordRow(lead[2]));
         continue;
       }
       if (!isChordLine(line)) { out.push(line.replace(/\s+$/, "")); continue; }
-      const chords = chordTokens(line);
+      // Over words, only the chords (and "x2") go in: a bar line would split a word.
+      const chords = chordTokens(line).filter((c) => !BAR_RE.test(c.tok));
       const next = lines[i + 1];
       if (next !== undefined && next.trim() && !isChordLine(next) && !isSectionLabel(next) && !DIRECTIVE_RE.test(next)) {
         const maxPos = Math.max(...chords.map((c) => c.pos));
@@ -241,7 +259,7 @@
         out.push(lyric.replace(/\s+$/, ""));
         i++;
       } else {
-        out.push(chords.map((c) => `[${c.tok}]`).join(" "));
+        out.push(chordRow(line));
       }
     }
     return out.join("\n");

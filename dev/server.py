@@ -8,6 +8,8 @@ Songs are saved to dev/songs.json (not committed) so they survive restarts.
 """
 import csv, datetime, html, io, json, os, re, urllib.parse, urllib.request, uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import mimetypes
+mimetypes.add_type("text/javascript", ".mjs")  # pdf.js in public/vendor
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public")
 PASSWORD = "test"

@@ -175,9 +175,41 @@
   window.addEventListener("orientationchange", syncTopbar);
   if (topbar && "ResizeObserver" in window) new ResizeObserver(syncTopbar).observe(topbar);
 
+  // The song tabs of a set stay pinned under the top bar while the page scrolls. CSS sticky does
+  // this too; the script is the backup for WebKit builds where it doesn't hold.
+  function pinSetJump() {
+    const bar = document.querySelector(".set-jump");
+    window.__setJump = null;
+    if (!bar) return;
+    const spacer = document.createElement("div");
+    spacer.className = "set-jump-spacer";
+    bar.before(spacer);
+    window.__setJump = () => {
+      if (!bar.isConnected) { window.__setJump = null; return; } // left the set
+      const bottom = topbar ? topbar.getBoundingClientRect().bottom : 0;
+      const frame = bar.parentElement.getBoundingClientRect();
+      const pinned = spacer.getBoundingClientRect().top < bottom;
+      bar.classList.toggle("pinned", pinned);
+      if (pinned) {
+        bar.style.top = `${bottom}px`;
+        bar.style.left = `${frame.left}px`;
+        bar.style.width = `${frame.width}px`;
+        spacer.style.height = `${bar.offsetHeight}px`;
+      } else {
+        bar.style.top = "";
+        bar.style.left = "";
+        bar.style.width = "";
+        spacer.style.height = "0px";
+      }
+    };
+    window.__setJump();
+  }
+  window.addEventListener("scroll", () => { if (window.__setJump) window.__setJump(); }, { passive: true });
+  window.addEventListener("resize", () => { if (window.__setJump) window.__setJump(); });
+
   // Tap a chord name in any song to see how to play it.
   document.addEventListener("click", (e) => {
-    const ch = e.target.closest(".sheet .ch");
+    const ch = e.target.closest(".sheet .ch:not(.barline)");
     if (!ch || !ch.textContent.trim() || !window.ChordHelp) return;
     if (String(window.getSelection && window.getSelection()).trim()) return; // selecting text, not tapping
     if (window.ChordHelp.open(ch.textContent.trim())) e.stopPropagation();
@@ -294,6 +326,7 @@
     if (on === stage.on) return;
     stage.on = on;
     document.body.classList.toggle("stage", on);
+    if (window.__setJump) window.__setJump(); // the song tabs pin to the top of the stage view too
     const root = document.documentElement;
     if (on) {
       stage.wakeBefore = !!wakeLock;
@@ -322,37 +355,163 @@
     document.addEventListener(ev, () => { if (!fsElement() && stage.on && stage.fs) { stage.fs = false; setStage(false); } });
   }
 
-  // ---------- Autoscroll ----------
-  // ctx = { key(): which song is on screen, estimate(): px/second that plays that song in about its length }
+  // ---------- Bottom-right controls: metronome (♩) and autoscroll ----------
+  // One group in the corner. The metronome and autoscroll keep their own state, except that
+  // stopping the metronome also stops autoscroll. Stopping autoscroll leaves the metronome running.
   const auto = { on: false, raf: 0, last: 0, acc: 0, ctx: null, wakeBefore: false };
+  let autoView = null; // how the song or set on screen autoscrolls: { key(), estimate() }
+  let metFocus = null; // () => the song the metronome follows, on a song or set view
+  let metShownId = "";
+  let metOpen = false;
+  let metWake = false;
+  let metPinned = prefs.get("pw-met-pin", false);
   const ctl = document.createElement("div");
   ctl.className = "scroll-ctl no-print";
   ctl.hidden = true;
-  document.body.appendChild(ctl);
+  const metPanel = document.createElement("div");
+  metPanel.id = "met-panel";
+  metPanel.className = "met-panel no-print";
+  metPanel.hidden = true;
+  document.body.append(ctl, metPanel);
 
-  // Default speed: a song lasts about 4 minutes, scaled by its tempo if we know it.
+  // Base speed: a song lasts about 4 minutes, scaled by its tempo if we know it. Autoscroll starts
+  // at twice this (2.0×) in the song and in the set, and the + and − buttons change it from there.
+  const START_MULT = 2;
   function estimateSpeed(el, song) {
     const h = el ? el.getBoundingClientRect().height : 1500;
     const bpm = parseInt(song && song.tempo, 10);
     const secs = bpm > 30 && bpm < 240 ? Math.min(360, Math.max(150, (240 * 72) / bpm)) : 240;
-    return Math.min(120, Math.max(6, (h - window.innerHeight * 0.4) / secs));
+    return Math.min(75, Math.max(3, (h - window.innerHeight * 0.4) / secs));
   }
-  const autoKey = () => (auto.ctx ? `pw-scroll-${auto.ctx.key()}` : "");
-  const autoSpeed = () => (auto.ctx ? prefs.get(autoKey(), 0) || auto.ctx.estimate() : 0);
+  // Speeds saved per song. The key changed when the 2.0× start was added, so older saved speeds
+  // from the 1.0× start don't override it.
+  const autoKey = () => (auto.ctx ? `pw-scroll2-${auto.ctx.key()}` : "");
+  const autoSpeed = () => (auto.ctx ? prefs.get(autoKey(), 0) || auto.ctx.estimate() * START_MULT : 0);
+
+  const songTempo = (song) => {
+    const m = /(\d{2,3})/.exec(String((song && song.tempo) || ""));
+    const n = m ? Number(m[1]) : 0;
+    return n >= Metronome.min && n <= Metronome.max ? n : 0;
+  };
+  const metSong = () => {
+    const f = metFocus && metFocus();
+    if (!f) return null;
+    return (state.songs || []).find((s) => s.id === f.id) || f;
+  };
 
   function drawCtl() {
-    if (!auto.ctx) { ctl.hidden = true; return; }
-    const mult = autoSpeed() / auto.ctx.estimate();
-    ctl.hidden = false;
+    ctl.hidden = !metFocus;
+    metPanel.hidden = !metFocus || !metOpen;
+    if (!metFocus) return;
+    const playing = Metronome.playing();
+    // − / + and the speed only show while autoscroll is running.
+    const hasAuto = auto.on && !!auto.ctx;
+    const mult = hasAuto ? autoSpeed() / auto.ctx.estimate() : 0;
     ctl.classList.toggle("playing", auto.on);
     ctl.innerHTML = `
-      <button type="button" class="btn icon" data-auto="slower" aria-label="Scroll slower">−</button>
+      <button type="button" class="btn icon ctl-met${playing ? " on" : ""}" data-ctl="met" aria-label="Metronome" aria-expanded="${metOpen}">♩</button>
+      <span class="ctl-sep" aria-hidden="true"></span>
+      ${hasAuto ? `<button type="button" class="btn icon" data-auto="slower" aria-label="Scroll slower">−</button>` : ""}
       <button type="button" class="btn icon sc-play" data-auto="toggle" aria-label="${auto.on ? "Pause autoscroll" : "Start autoscroll"}">${auto.on ? "❚❚" : "▶"}</button>
-      <button type="button" class="btn icon" data-auto="faster" aria-label="Scroll faster">+</button>
-      <span class="sc-speed" aria-live="polite">${mult.toFixed(1)}×</span>
-      ${auto.on ? "" : `<button type="button" class="btn icon ghost" data-auto="close" aria-label="Hide autoscroll">✕</button>`}`;
+      ${hasAuto ? `<button type="button" class="btn icon" data-auto="faster" aria-label="Scroll faster">+</button><span class="sc-speed" aria-live="polite">${mult.toFixed(1)}×</span>` : ""}`;
+    if (metOpen) drawMet();
   }
 
+  function drawMet() {
+    const song = metSong();
+    const b = Metronome.bpm();
+    const playing = Metronome.playing();
+    const st = songTempo(song);
+    const note = !song ? "" : st ? `This song is ${st} BPM.` : "No tempo set for this song yet.";
+    metPanel.innerHTML = `
+      <div class="met-head">
+        <span class="met-title">${esc(song ? song.title : "Metronome")}</span>
+        <button type="button" class="btn ghost met-pin" data-met="pin" aria-pressed="${metPinned}" title="Keep the panel open">${metPinned ? "Unpin" : "Pin"}</button>
+        <button type="button" class="btn icon ghost" data-met="close" aria-label="Close metronome">✕</button>
+      </div>
+      <div class="met-bpm">
+        <button type="button" class="btn icon" data-met="down" aria-label="Slower">−</button>
+        <output class="met-num" aria-live="polite"><b>${b}</b><small>BPM</small></output>
+        <button type="button" class="btn icon" data-met="up" aria-label="Faster">+</button>
+      </div>
+      <div class="met-row">
+        <button type="button" class="btn primary" data-met="toggle">${playing ? "Stop" : "Start"}</button>
+        ${song && b !== st ? `<button type="button" class="btn" data-met="save">Save ${b} as song tempo</button>` : ""}
+      </div>
+      <p class="hint">${note}</p>
+      <span class="met-dot" aria-hidden="true"></span>`;
+  }
+
+  // Tempo for the song in focus: the user's setting, then the song's tempo, then the last one.
+  function metLoad() {
+    const song = metSong();
+    if (!song) return;
+    const own = prefs.get(`pw-bpm-${song.id}`, 0);
+    Metronome.setBpm(own || songTempo(song) || Metronome.bpm() || 100);
+  }
+
+  // Runs on scroll: switches the tempo when the song in view changes, and redraws only then.
+  function metCheck() {
+    const song = metSong();
+    const id = song ? song.id : "";
+    if (id === metShownId) return;
+    metShownId = id;
+    if (song) metLoad();
+    drawCtl();
+  }
+
+  function metSetFocus(fn) {
+    metFocus = fn;
+    metShownId = "";
+    metCheck();
+    drawCtl();
+  }
+
+  // Stop the click and release Keep Awake, unless autoscroll or fullscreen still needs it.
+  function metRunStop() {
+    Metronome.stop();
+    if (!metWake && !auto.on && !stage.on) setWake(false);
+  }
+
+  // Leaving a song or set: stop everything and hide the controls.
+  function metHide() {
+    metRunStop();
+    metFocus = null;
+    metShownId = "";
+    metOpen = false;
+    autoView = null;
+    drawCtl();
+  }
+
+  // Changing the tempo by hand sets it for this song only, on this phone.
+  function metSetUser(n) {
+    const v = Metronome.setBpm(n);
+    const song = metSong();
+    if (song) prefs.set(`pw-bpm-${song.id}`, v === songTempo(song) ? 0 : v);
+    drawMet();
+  }
+
+  // Writes the tempo into the song, so everyone who opens it sees the same number.
+  async function metSave() {
+    const song = metSong();
+    if (!song) return;
+    const n = Metronome.bpm();
+    try {
+      const { song: saved } = await api(`/api/songs/${encodeURIComponent(song.id)}`, {
+        method: "PUT",
+        body: { ...song, tempo: `${n} bpm`, baseUpdatedAt: song.updatedAt },
+      });
+      upsert(saved);
+      prefs.set(`pw-bpm-${song.id}`, 0);
+      toast(`Saved ${n} BPM to ${song.title}.`);
+      drawMet();
+    } catch (err) {
+      if (err.message === "Signed out") return;
+      toast(err.status === 409 ? "Someone just changed this song. Reopen it and try again." : err.message);
+    }
+  }
+
+  // Autoscroll: starts on the view's own speed; stops with the same button.
   function tick(ts) {
     if (!auto.on) return;
     // Hold still while a chord pop-up or the lyrics dialog is open.
@@ -387,37 +546,98 @@
     if (auto.on) {
       auto.on = false;
       cancelAnimationFrame(auto.raf);
-      if (!auto.wakeBefore && !stage.on) setWake(false);
+      if (!auto.wakeBefore && !stage.on && !Metronome.playing()) setWake(false);
     }
     if (hide) auto.ctx = null;
     drawCtl();
   }
 
+  // The autoscroll button starts or stops autoscroll. It never touches the metronome.
+  function autoButton() {
+    if (auto.on) return stopAuto();
+    if (autoView) startAuto(autoView);
+  }
+
   ctl.addEventListener("click", (e) => {
+    if (e.target.closest("[data-ctl='met']")) {
+      metOpen = !metOpen;
+      return drawCtl();
+    }
     const b = e.target.closest("[data-auto]");
-    if (!b || !auto.ctx) return;
+    if (!b) return;
     const act = b.dataset.auto;
-    if (act === "toggle") return auto.on ? stopAuto() : startAuto();
-    if (act === "close") return stopAuto(true);
+    if (act === "toggle") return autoButton();
+    if (!auto.ctx) return;
     const next = Math.min(150, Math.max(3, autoSpeed() * (act === "faster" ? 1.15 : 1 / 1.15)));
     prefs.set(autoKey(), next); // remembered for this song on this phone
     drawCtl();
   });
 
-  // Space bar (or a Bluetooth page-turner set to space) starts/pauses when a song or set is open.
+  metPanel.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-met]");
+    if (!b) return;
+    const act = b.dataset.met;
+    if (act === "close") { metOpen = false; return drawCtl(); }
+    if (act === "pin") {
+      metPinned = !metPinned;
+      prefs.set("pw-met-pin", metPinned);
+      return drawMet();
+    }
+    if (act === "up") return metSetUser(Metronome.bpm() + 1);
+    if (act === "down") return metSetUser(Metronome.bpm() - 1);
+    // Start, stop and save finish the job, so the drawer folds back to the ♩ icon.
+    if (act === "toggle") {
+      metOpen = false;
+      // The metronome starts and stops on its own. Autoscroll keeps going either way.
+      if (Metronome.playing()) { metRunStop(); return drawCtl(); }
+      metWake = !!wakeLock;
+      setWake(true);
+      Metronome.start();
+      return drawCtl();
+    }
+    if (act === "save") { metOpen = false; metSave(); return drawCtl(); }
+  });
+
+  // Tapping away closes the panel, unless it's pinned.
+  document.addEventListener("pointerdown", (e) => {
+    if (!metOpen || metPinned) return;
+    if (e.target.closest && e.target.closest("#met-panel, .scroll-ctl")) return;
+    metOpen = false;
+    drawCtl();
+  });
+
+  Metronome.onChange((ev) => {
+    if (ev.type === "beat") {
+      const dot = metPanel.querySelector(".met-dot");
+      if (dot) { dot.classList.add("on"); setTimeout(() => dot.classList.remove("on"), 90); }
+      return;
+    }
+    drawCtl();
+  });
+
+  window.addEventListener("scroll", () => { if (metFocus) metCheck(); }, { passive: true });
+  window.addEventListener("resize", () => { if (metFocus) metCheck(); });
+
+  // Space bar: starts or stops autoscroll.
   document.addEventListener("keydown", (e) => {
-    if (e.key !== " " || e.repeat || !auto.ctx) return;
+    if (e.key !== " " || e.repeat || !metFocus) return;
     if (e.target.closest && e.target.closest("input, textarea, select, button, [contenteditable]")) return;
     e.preventDefault();
-    auto.on ? stopAuto() : startAuto();
+    autoButton();
   });
-  document.addEventListener("visibilitychange", () => { if (document.hidden && auto.on) stopAuto(); });
+  // Locking the screen or leaving the app stops both.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) return;
+    if (auto.on) stopAuto();
+    if (Metronome.playing()) metRunStop();
+  });
 
   // ---------- Router ----------
   async function route() {
     const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
     if (stage.on) await setStage(false);
     stopAuto(true);
+    metHide();
     if (parts[0] !== "song") setWake(false);
     try {
       setNav(!parts.length || parts[0] === "song" || parts[0] === "set" ? "songs" : parts[0] === "stats" ? "stats" : "");
@@ -470,7 +690,10 @@
           <h2>Our songbook is ready</h2>
           <p>Add the first song. You can paste a chord sheet straight from anywhere and it will line the chords up for you.</p>
           <a class="btn primary" href="#/new">+ Add a song</a>
+          <p class="empty-more">Have chord files already? <button type="button" class="link" id="import">Import chord files or a backup</button></p>
+          <input type="file" id="import-files" multiple accept="${window.FileImport.accept},.json,application/json" hidden>
         </div>`;
+      wireImport();
       return;
     }
 
@@ -516,7 +739,7 @@
         <button type="button" class="link" id="import">Import chord files or a backup</button>
         <span aria-hidden="true"> · </span>
         <a class="link" href="/install">Put this on your phone</a>
-        <input type="file" id="import-files" multiple accept=".cho,.chordpro,.chopro,.crd,.pro,.txt,.json,text/plain,application/json" hidden>
+        <input type="file" id="import-files" multiple accept="${window.FileImport.accept},.json,application/json" hidden>
         ${CHURCH_PLATE}
       </footer>`;
 
@@ -567,48 +790,155 @@
     document.getElementById("print-list").addEventListener("click", () => window.print());
     const planBtn = document.getElementById("plan-set");
     if (planBtn) planBtn.addEventListener("click", () => planSet().catch((err) => toast(err.message)));
+    wireImport();
+    draw();
+  }
+
+
+  function wireImport() {
     const $files = document.getElementById("import-files");
     document.getElementById("import").addEventListener("click", () => $files.click());
-    $files.addEventListener("change", async () => {
+    $files.addEventListener("change", () => {
       const files = [...$files.files];
       $files.value = "";
-      if (!files.length) return;
-      const existing = new Set(songs.map((s) => s.title.trim().toLowerCase()));
-      let added = 0;
-      const skipped = [];
-      toast(`Importing ${files.length} file${files.length === 1 ? "" : "s"}…`);
-      const titleToId = new Map(songs.map((s) => [s.title.trim().toLowerCase(), s.id]));
-      const backups = [];
-      for (const file of files) {
-        try {
-          if (/\.json$/i.test(file.name)) {
-            // A backup from "Download a backup of every song": restore songs (with their dates) and upcoming sets.
-            const data = JSON.parse(await file.text());
-            if (!Array.isArray(data.songs)) throw new Error("not a songbook backup");
-            const idMap = new Map();
-            for (const old of data.songs) {
-              const key = String(old.title || "").trim().toLowerCase();
-              if (!key) continue;
-              if (titleToId.has(key)) { idMap.set(old.id, titleToId.get(key)); skipped.push(`${old.title} (already in the songbook)`); continue; }
-              const { song } = await api("/api/songs", {
-                method: "POST",
-                body: {
-                  title: old.title, artist: old.artist, key: old.key, tempo: old.tempo, time: old.time, capo: old.capo,
-                  tags: old.tags, link: old.link, notes: old.notes, body: old.body, sung: old.sung,
-                },
-              });
-              upsert(song);
-              titleToId.set(key, song.id);
-              idMap.set(old.id, song.id);
-              added++;
-            }
-            backups.push({ data, idMap });
-            continue;
+      if (files.length) importFiles(files).catch((err) => { if (err.message !== "Signed out") toast(err.message); });
+    });
+  }
+
+  // Resolves once a dialog is closed, whichever way it closes. Some browsers don't send the
+  // "close" event after a form button, so the open state is checked too.
+  function whenClosed(dlg) {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (dlg.open) return;
+        clearInterval(timer);
+        dlg.removeEventListener("close", check);
+        resolve();
+      };
+      const timer = setInterval(check, 150);
+      dlg.addEventListener("close", check);
+    });
+  }
+
+  function dropTitleLine(body, title) {
+    const lines = body.split("\n");
+    const first = lines.findIndex((l) => l.trim());
+    if (first >= 0 && lines[first].replace(/\s+/g, " ").trim().toLowerCase() === title.toLowerCase()) lines.splice(first, 1);
+    return lines.join("\n").replace(/^\n+/, "");
+  }
+
+  // The details lines at the top of a plain chord sheet: "Key: G" / "Key of G", "Capo: 2",
+  // "Tempo: 72" / "BPM 72", "Artist: …", and a writer's name right above one of those.
+  // Returns them with the body minus those lines.
+  function pullDetails(body) {
+    const lines = body.split("\n");
+    const out = {};
+    const RULES = [
+      ["key", /^\s*key\s*(?:[:\-]|of)?\s*([A-G][#b]?m?)\s*$/i],
+      ["capo", /^\s*capo\s*[:\-]?\s*(\d{1,2})(?:\s*(?:st|nd|rd|th))?(?:\s*fret)?\s*$/i],
+      ["tempo", /^\s*(?:tempo|bpm)\s*[:\-]?\s*(\d{2,3})\s*(?:bpm)?\s*$/i],
+      ["artist", /^\s*(?:artist\s*[:\-]|(?:words and music|written) by\s*:?)\s*(.{2,60})$/i],
+    ];
+    let i = 0, took = false;
+    for (; i < Math.min(lines.length, 6); i++) {
+      const l = lines[i];
+      if (!l.trim()) continue;
+      const rule = RULES.find(([, re]) => re.test(l));
+      if (rule) { out[rule[0]] = rule[1].exec(l)[1].trim(); lines[i] = null; took = true; continue; }
+      // A short plain line right before "Key:" (and nothing taken yet): the writer.
+      const next = lines.slice(i + 1).find((x) => x.trim()) || "";
+      if (!took && !out.artist && l.trim().length <= 40 && !/[\[\]{}|]/.test(l) && !CP.isChordLine(l) && !CP.isSectionLabel(l) &&
+          RULES.slice(0, 3).some(([, re]) => re.test(next))) { out.artist = l.trim(); lines[i] = null; continue; }
+      break;
+    }
+    return { ...out, body: lines.filter((l) => l !== null).join("\n").replace(/^\n+/, "") };
+  }
+
+  // One file with several songs in it: import them as separate songs, or keep it as one?
+  // Resolves "split", "one", or "" (not now).
+  function askSplit(name, songs) {
+    return new Promise((resolve) => {
+      let dlg = document.getElementById("split-dialog");
+      if (!dlg) {
+        dlg = document.createElement("dialog");
+        dlg.id = "split-dialog";
+        dlg.className = "lyrics-dialog";
+        document.body.appendChild(dlg);
+      }
+      const names = songs.map((s, i) => `<li>${esc(s.title || `Song ${i + 1}`)}</li>`).join("");
+      dlg.innerHTML = `
+        <form method="dialog">
+          <h2>${songs.length} songs in this file</h2>
+          <p class="hint">${esc(name)} looks like it has ${songs.length} songs in it:</p>
+          <ol class="split-list">${names}</ol>
+          <button class="btn primary" value="split">Import as ${songs.length} songs</button>
+          <button class="btn" value="one">Keep it as one song</button>
+          <button class="btn ghost" value="cancel">Not now</button>
+        </form>`;
+      dlg.returnValue = "";
+      dlg.showModal();
+      whenClosed(dlg).then(() => resolve(dlg.returnValue === "split" || dlg.returnValue === "one" ? dlg.returnValue : ""));
+    });
+  }
+
+  // Chord files (PDF, Word, RTF, ChordPro, text) or a backup, from the song list.
+  // opts.split: already chose to split a multi-song file (handed over from the editor).
+  async function importFiles(files, opts = {}) {
+    const songs = await loadSongs();
+    const existing = new Set(songs.map((s) => s.title.trim().toLowerCase()));
+    let added = 0;
+    const skipped = [];
+    toast(`Importing ${files.length} file${files.length === 1 ? "" : "s"}…`);
+    const titleToId = new Map(songs.map((s) => [s.title.trim().toLowerCase(), s.id]));
+    const backups = [];
+    for (const file of files) {
+      try {
+        if (/\.json$/i.test(file.name)) {
+          // A backup from "Download a backup of every song": restore songs (with their dates) and upcoming sets.
+          const data = JSON.parse(await file.text());
+          if (!Array.isArray(data.songs)) throw new Error("not a songbook backup");
+          const idMap = new Map();
+          for (const old of data.songs) {
+            const key = String(old.title || "").trim().toLowerCase();
+            if (!key) continue;
+            if (titleToId.has(key)) { idMap.set(old.id, titleToId.get(key)); skipped.push(`${old.title} (already in the songbook)`); continue; }
+            const { song } = await api("/api/songs", {
+              method: "POST",
+              body: {
+                title: old.title, artist: old.artist, key: old.key, tempo: old.tempo, time: old.time, capo: old.capo,
+                tags: old.tags, link: old.link, notes: old.notes, body: old.body, sung: old.sung,
+              },
+            });
+            upsert(song);
+            titleToId.set(key, song.id);
+            existing.add(key);
+            idMap.set(old.id, song.id);
+            added++;
           }
-          let body = await file.text();
-          if (CP.looksLikeChordsOverLyrics(body)) body = CP.toChordPro(body);
+          backups.push({ data, idMap });
+          continue;
+        }
+        const read = await window.FileImport.read(file, file.name);
+        // A songbook or a week's set in one file: ask before making it several songs.
+        let parts = [{ title: read.title, text: read.text }];
+        if (read.songs.length > 1) {
+          const choice = opts.split ? "split" : await askSplit(file.name, read.songs);
+          if (!choice) continue;
+          if (choice === "split") parts = read.songs;
+        }
+        // Chords over the words? Judged on the whole file: one short song may have a single chord line.
+        const overLyrics = CP.looksLikeChordsOverLyrics(read.text);
+        for (const part of parts) {
+          let body = part.text;
+          if (overLyrics) body = CP.toChordPro(body);
           const meta = CP.parse(body).meta;
-          const title = (meta.title || file.name.replace(/\.[^.]+$/, "")).trim();
+          const title = (meta.title || part.title || "Untitled song").trim();
+          // The title is already the song's name; don't repeat it as the sheet's first line.
+          if (!meta.title) body = dropTitleLine(body, title);
+          // "Key: G", "Capo 2" and a writer's line at the top go into the song's details.
+          const top = pullDetails(body);
+          body = top.body;
+          for (const k of ["artist", "key", "tempo", "capo"]) if (!meta[k] && top[k]) meta[k] = top[k];
           if (existing.has(title.toLowerCase())) { skipped.push(`${title} (already in the songbook)`); continue; }
           const { song } = await api("/api/songs", {
             method: "POST",
@@ -618,33 +948,32 @@
           existing.add(title.toLowerCase());
           titleToId.set(title.toLowerCase(), song.id);
           added++;
-        } catch (err) {
-          if (err.message === "Signed out") return;
-          skipped.push(`${file.name} (${err.message})`);
+        }
+      } catch (err) {
+        if (err.message === "Signed out") return;
+        skipped.push(`${file.name} (${err.message})`);
+      }
+    }
+    let setsAdded = 0;
+    if (backups.length) {
+      const current = await loadSetlists(true);
+      const t = today();
+      for (const { data, idMap } of backups) {
+        for (const old of data.setlists || []) {
+          if (!old.date || old.date < t || old.done) continue;
+          if (current.some((x) => x.date === old.date)) { skipped.push(`Set for ${old.date} (one already exists for that date)`); continue; }
+          const items = (old.items || []).filter((it) => idMap.has(it.songId)).map((it) => ({ songId: idMap.get(it.songId), shift: it.shift || 0 }));
+          try {
+            const { setlist } = await api("/api/setlists", { method: "POST", body: { date: old.date, title: old.title, notes: old.notes, items } });
+            upsertSet(setlist);
+            setsAdded++;
+          } catch (err) { skipped.push(`Set for ${old.date} (${err.message})`); }
         }
       }
-      let setsAdded = 0;
-      if (backups.length) {
-        const current = await loadSetlists(true);
-        const t = today();
-        for (const { data, idMap } of backups) {
-          for (const old of data.setlists || []) {
-            if (!old.date || old.date < t || old.done) continue;
-            if (current.some((x) => x.date === old.date)) { skipped.push(`Set for ${old.date} (one already exists for that date)`); continue; }
-            const items = (old.items || []).filter((it) => idMap.has(it.songId)).map((it) => ({ songId: idMap.get(it.songId), shift: it.shift || 0 }));
-            try {
-              const { setlist } = await api("/api/setlists", { method: "POST", body: { date: old.date, title: old.title, notes: old.notes, items } });
-              upsertSet(setlist);
-              setsAdded++;
-            } catch (err) { skipped.push(`Set for ${old.date} (${err.message})`); }
-          }
-        }
-      }
-      await renderList();
-      toast(`Imported ${added} song${added === 1 ? "" : "s"}${setsAdded ? ` and ${setsAdded} set${setsAdded === 1 ? "" : "s"}` : ""}${skipped.length ? `, skipped ${skipped.length}` : ""}.`);
-      if (skipped.length) alert(`These weren't imported:\n\n${skipped.join("\n")}`);
-    });
-    draw();
+    }
+    await renderList();
+    toast(`Imported ${added} song${added === 1 ? "" : "s"}${setsAdded ? ` and ${setsAdded} set${setsAdded === 1 ? "" : "s"}` : ""}${skipped.length ? `, skipped ${skipped.length}` : ""}.`);
+    if (skipped.length) alert(`These weren't imported:\n\n${skipped.join("\n")}`);
   }
 
   // ---------- Song view ----------
@@ -811,8 +1140,7 @@
       const sheet = document.getElementById("sheet");
       switch (btn.dataset.act) {
         case "autoscroll":
-          if (auto.on) stopAuto();
-          else startAuto({ key: () => song.id, estimate: () => estimateSpeed(document.getElementById("sheet"), song) });
+          autoButton();
           break;
         case "reset":
           if (!shift) break;
@@ -883,6 +1211,8 @@
     if (shift && opts().base) {
       toast(`Showing in ${opts().target}, the key you moved it to last time (original ${opts().base}). Tap the key to go back.`);
     }
+    metSetFocus(() => song);
+    autoView = { key: () => song.id, estimate: () => estimateSpeed(document.getElementById("sheet"), song) };
   }
 
   // ---------- Set lists ----------
@@ -1074,12 +1404,15 @@
           <button class="btn icon" data-act="autoscroll" type="button" aria-label="Autoscroll">▶</button>
           <button class="btn" data-act="stage" type="button">Exit</button>
         </div>`;
+      pinSetJump();
     }
 
     function currentIndex() {
       const secs = [...document.querySelectorAll(".set-song")];
       let idx = 0;
       secs.forEach((s, i) => { if (s.getBoundingClientRect().top < 140) idx = i; });
+      // At the end of the page, a short last song can't scroll up to the top: it's the one in view.
+      if (secs.length && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4) idx = secs.length - 1;
       return idx;
     }
     function jump(i) {
@@ -1099,16 +1432,9 @@
       if (!btn) return;
       const i = Number(btn.dataset.i);
       switch (btn.dataset.act) {
-        case "autoscroll": {
-          if (auto.on) { stopAuto(); break; }
-          // Each song in the set keeps its own speed; it switches as you scroll into the next song.
-          const cur = () => songOf(set.items[currentIndex()] || set.items[0]) || {};
-          startAuto({
-            key: () => cur().id || "set",
-            estimate: () => estimateSpeed(document.getElementById(`sheet-${currentIndex()}`), cur()),
-          });
+        case "autoscroll":
+          autoButton();
           break;
-        }
         case "reset": {
           const it = set.items[i];
           if (!it || !it.shift) break;
@@ -1180,6 +1506,10 @@
 
     draw();
     askRoleIfNeeded(anyCapo());
+    const cur = () => songOf(set.items[currentIndex()] || set.items[0]) || {};
+    metSetFocus(() => { const it = set.items[currentIndex()] || set.items[0]; return it ? songOf(it) : null; });
+    // Each song in the set keeps its own speed; it switches as you scroll into the next song.
+    autoView = { key: () => cur().id || "set", estimate: () => estimateSpeed(document.getElementById(`sheet-${currentIndex()}`), cur()) };
     if (opts.jump) setTimeout(() => jump(opts.jump - 1), 50);
     if (opts.print) {
       history.replaceState(null, "", `#/set/${sid}`);
@@ -1401,6 +1731,16 @@
   }
 
   // ---------- Editor ----------
+  // Same song already in the songbook? Titles match loosely ("The", brackets, punctuation);
+  // when both have an artist, they must match too.
+  const titleKey = (t) => String(t || "").toLowerCase().replace(/\([^)]*\)|\[[^\]]*\]/g, "").replace(/^the\s+/, "").replace(/[^a-z0-9]+/g, "");
+  function findDuplicate(title, artist, exceptId) {
+    const key = titleKey(title);
+    if (!key) return null;
+    const a = String(artist || "").trim().toLowerCase();
+    return (state.songs || []).find((s) => s.id !== exceptId && titleKey(s.title) === key &&
+      !(a && s.artist && s.artist.trim().toLowerCase() !== a)) || null;
+  }
   const KEYS = [...CP.MAJOR_KEYS, "C#", "Gb", ...CP.MINOR_KEYS];
   const EXAMPLE = `{title: Amazing Grace}
 {artist: John Newton}
@@ -1428,14 +1768,14 @@ Was [Em]blind but [D]now I [G]see`;
           <input id="find-q" type="search" placeholder="Song title, or paste an Ultimate Guitar or Hymnary link" autocomplete="off" aria-label="Find a song online">
           <button class="btn primary" type="submit">Find</button>
           <button class="btn" type="button" id="open-file">Open a file</button>
-          <input type="file" id="file" accept=".cho,.chordpro,.chopro,.crd,.pro,.txt,text/plain" hidden>
+          <input type="file" id="file" accept="${window.FileImport.accept}" hidden>
         </form>
-        <p class="hint">Searches Ultimate Guitar (chords) and Hymnary.org (hymn words). Files can be ChordPro (from SongSelect) or plain text. Always double-check chords and key before Sunday.</p>
+        <p class="hint">Searches Ultimate Guitar (chords) and Hymnary.org (hymn words). Files can be PDF, Word, RTF, ChordPro (from SongSelect) or plain text. Always double-check chords and key before Sunday.</p>
         <div id="find-results" aria-live="polite"></div>
       </details>
       <form id="form" novalidate>
         <div class="grid">
-          <div class="f-title"><label for="f-title">Title *</label><input id="f-title" name="title" required maxlength="200" value="${esc(s.title)}"></div>
+          <div class="f-title"><label for="f-title">Title *</label><input id="f-title" name="title" required maxlength="200" value="${esc(s.title)}"><p class="dup-note" id="dup-note" hidden></p></div>
           <div class="f-artist"><label for="f-artist">Artist / writer</label><input id="f-artist" name="artist" maxlength="200" value="${esc(s.artist)}"></div>
           <div class="f-key"><label for="f-key">Our key</label><input id="f-key" name="key" list="keys" maxlength="12" value="${esc(s.key)}" placeholder="G"></div>
           <div class="f-tempo"><label for="f-tempo">Tempo</label><input id="f-tempo" name="tempo" maxlength="20" value="${esc(s.tempo)}" placeholder="72 bpm"></div>
@@ -1477,7 +1817,7 @@ Was [Em]blind but [D]now I [G]see`;
         </div>
 
         <p class="error" id="err" role="alert" hidden></p>
-        <div class="actions">
+        <div class="actions save-bar">
           <button class="btn primary" type="submit" id="save">${song ? "Save changes" : "Save song"}</button>
           <a class="btn" href="${song ? `#/song/${encodeURIComponent(song.id)}` : "#/"}">Cancel</a>
           <div class="spacer"></div>
@@ -1552,6 +1892,19 @@ Was [Em]blind but [D]now I [G]see`;
 
     form.addEventListener("input", () => { state.dirty = true; });
     $body.addEventListener("input", preview);
+    const $dup = document.getElementById("dup-note");
+    const checkDup = () => {
+      const d = findDuplicate(F.title.value, F.artist.value, song && song.id);
+      $dup.hidden = !d;
+      if (d) $dup.innerHTML = `Already in the songbook: <a href="#/song/${encodeURIComponent(d.id)}">${esc(d.title)}</a>${d.artist ? ` by ${esc(d.artist)}` : ""}`;
+    };
+    F.title.addEventListener("input", checkDup);
+    F.artist.addEventListener("input", checkDup);
+    checkDup();
+    // Suggest the key from the chords while typing; it's filled in on save if left empty.
+    const suggestKey = () => { F.key.placeholder = CP.guessKey($body.value) || "G"; };
+    $body.addEventListener("input", suggestKey);
+    suggestKey();
     $body.addEventListener("paste", (e) => {
       const text = e.clipboardData && e.clipboardData.getData("text/plain");
       if (!text || !CP.looksLikeChordsOverLyrics(text)) return;
@@ -1653,10 +2006,33 @@ Was [Em]blind but [D]now I [G]see`;
       const file = $file.files[0];
       $file.value = "";
       if (!file) return;
-      const text = await file.text();
-      const title = CP.parse(text).meta.title || file.name.replace(/\.[^.]+$/, "");
-      if (applyImport({ text, title, artist: "", key: "", url: "" })) toast(`Opened ${file.name}. Check it over, then save.`);
+      try {
+        const read = await window.FileImport.read(file, file.name);
+        if (read.songs.length > 1 && await splitFromEditor(file, read.songs)) return;
+        const metaTitle = CP.parse(read.text).meta.title;
+        const title = metaTitle || read.title;
+        // "Key: G", "Capo 2" and a writer's line at the top go into the song's details, as on import.
+        const top = pullDetails(metaTitle ? read.text : dropTitleLine(read.text, title));
+        const keyWasEmpty = !F.key.value.trim();
+        if (applyImport({ text: top.body, title, artist: top.artist || "", key: "", capo: parseInt(top.capo, 10) || 0, url: "" })) {
+          if (top.key && keyWasEmpty) F.key.value = top.key;
+          if (top.tempo && !F.tempo.value.trim()) F.tempo.value = top.tempo;
+          preview();
+          toast(`Opened ${file.name}. Check it over, then save.`);
+        }
+      } catch (err) { toast(err.message); }
     });
+
+    // A file with several songs, opened from the song editor: offer to add each one to the
+    // songbook (from the song list). True if that's what happened.
+    async function splitFromEditor(file, songs) {
+      const choice = await askSplit(file.name, songs);
+      if (choice !== "split") return choice === "";
+      state.dirty = false;
+      location.hash = "#/";
+      await importFiles([file], { split: true });
+      return true;
+    }
 
     function collect() {
       const v = (n) => F[n].value.trim();
@@ -1678,6 +2054,12 @@ Was [Em]blind but [D]now I [G]see`;
         F.title.focus();
         return;
       }
+      const dupe = findDuplicate(data.title, data.artist, song && song.id);
+      if (dupe && !overwrite && !confirm(`"${dupe.title}"${dupe.artist ? ` by ${dupe.artist}` : ""} is already in the songbook.\n\nSave this as another copy anyway?`)) {
+        F.title.focus();
+        return;
+      }
+      if (!data.key) data.key = F.key.value = CP.guessKey(data.body) || "";
       const bad = data.sung.find((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d));
       if (bad) {
         $err.textContent = `"${bad}" isn't a date like 2026-10-26.`;
